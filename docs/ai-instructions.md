@@ -109,48 +109,50 @@ run_index_fitting(
 
 ### 1. 主函数入参
 
-- `index_code`：
-    - 用户输入的六位指数代码，例如 `"000016"`。
-    - 程序根据公开指数资料识别指数所属交易所，并生成迅投行情代码，例如 `"000016.SH"`。
-    - 无法唯一确定指数所属交易所时，停止程序并进入人工审核。
-- `index_units`：
-    - 正整数。
-    - 用于确定目标股票金额的指数单位数。
-- `contract_multiplier`：
-    - 用户显式输入的正数。
-    - 程序不自动映射或推断。
-- `refresh_trade_rules`：
-    - `False`：优先使用本地交易规则快照。
-    - `True`：重新从官方来源爬取并生成交易规则快照。
-- `debug`：
-    - 控制详细日志和调试中间产物。
-    - 每一个 Task 函数都必须保留 `debug=False` 参数。
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| index_code | string | 必填，六位指数代码，例如 `000016` |
+| index_units | int | 必填，正整数 |
+| contract_multiplier | float | 必填，正数 |
+| refresh_trade_rules | bool | 可选，默认 `false` |
+| debug | bool | 可选，默认 `false` |
+
+- 程序根据 `index_code` 的公开指数资料识别所属交易所，并生成迅投行情代码；无法唯一确定时停止并进入人工审核。
+- `contract_multiplier` 仅由用户显式输入，程序不自动映射或推断。
+- `refresh_trade_rules=False` 时优先使用本地交易规则快照；为 `True` 时重新从官方来源爬取。
+- `debug` 控制详细日志和调试中间产物；每一个 Task 函数都必须保留 `debug=False` 参数。
 
 ### 2. 主函数成功返回值
 
 主函数成功时仅返回以下核心结果，不返回所有中间产物：
 
-```python
-{
-    "run_summary": DataFrame,
-    "validation_report": DataFrame,
-    "theoretical_portfolio": DataFrame,
-    "target_portfolio": DataFrame,
-    "deviation_report": DataFrame,
-    "portfolio_summary": dict,
-    "output_paths": dict,
-}
-```
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| run_summary | DataFrame | 结构见“运行摘要”字段表 |
+| validation_report | DataFrame | 结构见“校验报告”字段表 |
+| theoretical_portfolio | DataFrame | 结构见“理论股票篮子”字段表 |
+| target_portfolio | DataFrame | 结构见“目标股票篮子”字段表 |
+| deviation_report | DataFrame | 结构见“静态拟合偏差报告”字段表 |
+| portfolio_summary | dict | 结构见“组合摘要”字段表 |
+| output_paths | dict | 结构见“输出路径”字段表 |
 
 以下业务中间产物必须落盘保存，但不应作为主函数返回值：
 
-- 指数样本权重。
-- 指数成分校验结果。
-- 行情快照。
-- 交易规则。
-- 全市场 ETF 汇总、成分和失败清单。
-- 除权除息数据和失败清单。
-- 原始下载文件。
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| df_index_weights | DataFrame | 字段结构见“CSI 指数样本权重 `df_index_weights`” |
+| df_index_cons | DataFrame | 字段结构见“CSI 指数成分股 `df_index_cons`” |
+| df_index_constituents_check | DataFrame | 字段结构见“指数成分校验 `df_index_constituents_check`” |
+| df_market_snapshot | DataFrame | 字段结构见“构建日行情快照 `df_market_snapshot`” |
+| df_security_rules | DataFrame | 字段结构见“交易数量规则 `df_security_rules`” |
+| df_rule_parser_candidates | DataFrame | 字段结构见“交易规则解析候选 `df_rule_parser_candidates`” |
+| df_component_rules | DataFrame | 字段结构见“成分股板块与规则匹配 `df_component_rules`” |
+| df_etf_summary | DataFrame | 字段结构见“ETF 汇总 `df_etf_summary`” |
+| df_etf_components | DataFrame | 字段结构见“ETF 成分 `df_etf_components`” |
+| df_etf_failures | DataFrame | 字段结构见“ETF 失败清单 `df_etf_failures`” |
+| df_corporate_actions | DataFrame | 字段结构见“除权除息信息 `df_corporate_actions`” |
+| df_corporate_action_failures | DataFrame | 字段结构见“除权除息失败清单 `df_corporate_action_failures`” |
+| raw_files | 文件集合 | 结构与路径见“输出文件清单” |
 
 
 ## 四、程序总体实现原则
@@ -174,7 +176,458 @@ run_index_fitting(
 - Notebook 最后一个单元格默认调用完整主函数。
 
 
-## 五、运行目录、日志与人工审核
+## 五、统一数据结构与输出文件契约
+
+本节是所有结构化输入、函数返回结构、业务中间产物和落盘表格的唯一字段定义。各 Task 的输入与输出必须引用本节对应结构，不得临时增加、删除或改名字段；确需扩展时，应先更新本节。
+
+### 1. 运行上下文 `runtime_context`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| run_id | string | `YYYYMMDD_HHMMSS` |
+| run_status | string | `INITIALIZED` / `RUNNING` / `SUCCESS` / `REVIEW_REQUIRED` / `FAILED` |
+| run_dir | string | 绝对路径 |
+| csv_dir | string | 绝对路径 |
+| raw_dir | string | 绝对路径 |
+| debug_dir | string | 绝对路径；`debug=False` 时仍返回规划路径 |
+| log_path | string | 绝对路径，文件名为 `run.log` |
+| started_at | datetime | ISO 8601，含时区 |
+| finished_at | datetime 或 null | ISO 8601，含时区 |
+
+### 2. 迅投连接状态 `xtquant_connection_status`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| connected | bool | `true` / `false` |
+| data_dir | string | 绝对路径 |
+| checked_at | datetime | ISO 8601，含时区 |
+| trading_date_sample | list[string] | 每项为 `YYYYMMDD` |
+| message | string |  |
+
+### 3. 最小自测结果 `self_test_results`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| test_name | string | 稳定测试标识 |
+| status | string | `PASS` / `FAIL` |
+| expected_value | string | 标量或 JSON 序列化文本 |
+| actual_value | string | 标量或 JSON 序列化文本 |
+| message | string |  |
+| tested_at | datetime | ISO 8601，含时区 |
+
+### 4. CSI 指数样本权重 `df_index_weights`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| data_date | date | `YYYY-MM-DD` |
+| index_code | string | 六位代码 |
+| index_name | string |  |
+| stock_code | string | 六位代码 |
+| stock_name | string |  |
+| exchange | string | 官方交易所名称 |
+| raw_weight_pct | float | 百分数数值，例如 `5.147` 表示 `5.147%` |
+| source_file | string | 文件名 |
+| source | string | 官方来源 URL |
+| retrieved_at | datetime | ISO 8601，含时区 |
+| run_id | string | `YYYYMMDD_HHMMSS` |
+
+### 5. CSI 指数成分股 `df_index_cons`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| data_date | date | `YYYY-MM-DD` |
+| index_code | string | 六位代码 |
+| index_name | string |  |
+| stock_code | string | 六位代码 |
+| stock_name | string |  |
+| exchange | string | 官方交易所名称 |
+| source_file | string | 文件名 |
+| source | string | 官方来源 URL |
+| retrieved_at | datetime | ISO 8601，含时区 |
+| run_id | string | `YYYYMMDD_HHMMSS` |
+
+### 6. CSI 原始文件路径 `csi_file_paths`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| closeweight_path | string | 绝对路径 |
+| cons_path | string | 绝对路径 |
+| closeweight_source_url | string | URL |
+| cons_source_url | string | URL |
+
+### 7. 指数成分校验 `df_index_constituents_check`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| stock_code | string | 六位代码 |
+| in_closeweight | bool | `true` / `false` |
+| in_cons | bool | `true` / `false` |
+| closeweight_data_date | date 或 null | `YYYY-MM-DD` |
+| cons_data_date | date 或 null | `YYYY-MM-DD` |
+| check_status | string | `MATCHED` / `ONLY_IN_CLOSEWEIGHT` / `ONLY_IN_CONS` |
+| run_id | string | `YYYYMMDD_HHMMSS` |
+
+### 8. 指数市场上下文 `index_market_context`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| index_code | string | 六位代码 |
+| xt_index_code | string | `XXXXXX.SH` 或 `XXXXXX.SZ` |
+| index_exchange | string | `SH` / `SZ` |
+| run_date | date | `YYYY-MM-DD` |
+| build_date | date | `YYYY-MM-DD` |
+| resolved_at | datetime | ISO 8601，含时区 |
+
+### 9. ETF 汇总 `df_etf_summary`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| etf_code | string | 带市场后缀 |
+| etf_name | string |  |
+| exchange | string | `SH` / `SZ` 或迅投原始值 |
+| minimum_creation_redemption_unit | float 或 null |  |
+| creation_allowed | bool 或 null | `true` / `false` |
+| redemption_allowed | bool 或 null | `true` / `false` |
+| component_count | int |  |
+| retrieved_at | datetime | ISO 8601，含时区 |
+| source | string | `xtdata.get_etf_info` |
+| run_id | string | `YYYYMMDD_HHMMSS` |
+
+### 10. ETF 成分 `df_etf_components`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| etf_code | string | 带市场后缀 |
+| stock_code | string | 带市场后缀；无法标准化时保留原值 |
+| stock_name | string 或 null |  |
+| component_qty | float 或 null |  |
+| cash_substitution_flag | string 或 null | 保留迅投原始枚举值 |
+| cash_substitution_amount | float 或 null | 人民币元 |
+| premium_ratio | float 或 null | 小数 |
+| raw_component_json | string | JSON 字符串 |
+| retrieved_at | datetime | ISO 8601，含时区 |
+| source | string | `xtdata.get_etf_info` |
+| run_id | string | `YYYYMMDD_HHMMSS` |
+
+### 11. ETF 失败清单 `df_etf_failures`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| etf_code | string 或 null | 带市场后缀 |
+| failure_stage | string | `DOWNLOAD` / `PARSE` / `SAVE` / `EMPTY_COMPONENTS` |
+| reason | string |  |
+| is_blocking | bool | `true` / `false` |
+| retrieved_at | datetime | ISO 8601，含时区 |
+| run_id | string | `YYYYMMDD_HHMMSS` |
+
+### 12. 除权除息信息 `df_corporate_actions`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| stock_code | string | 带市场后缀 |
+| query_window | string | `HISTORICAL` / `FUTURE` |
+| ex_date | date 或 null | `YYYY-MM-DD` |
+| time | int 或 null | Unix 毫秒时间戳 |
+| interest | float 或 null | 每股现金分红，沿用迅投口径 |
+| stockBonus | float 或 null | 沿用迅投原始口径 |
+| stockGift | float 或 null | 沿用迅投原始口径 |
+| allotNum | float 或 null | 沿用迅投原始口径 |
+| allotPrice | float 或 null | 人民币元 |
+| gugai | float 或 null | 沿用迅投原始口径 |
+| dr | float 或 null | 沿用迅投原始口径 |
+| retrieved_at | datetime | ISO 8601，含时区 |
+| source | string | `xtdata.get_divid_factors` |
+| run_id | string | `YYYYMMDD_HHMMSS` |
+
+### 13. 除权除息失败清单 `df_corporate_action_failures`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| stock_code | string | 带市场后缀 |
+| query_window | string | `HISTORICAL` / `FUTURE` |
+| start_date | date | `YYYY-MM-DD` |
+| end_date | date | `YYYY-MM-DD` |
+| reason | string |  |
+| retrieved_at | datetime | ISO 8601，含时区 |
+| run_id | string | `YYYYMMDD_HHMMSS` |
+
+### 14. 交易数量规则 `df_security_rules`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| exchange | string | `SH` / `SZ` |
+| board | string | `MAIN` / `STAR` / `CHINEXT` |
+| buy_min_qty | int | 股 |
+| buy_qty_step | int | 股 |
+| rule_source_url | string | URL |
+| rule_effective_date | date 或 null | `YYYY-MM-DD` |
+| retrieved_at | datetime | ISO 8601，含时区 |
+
+### 15. 交易规则解析候选 `df_rule_parser_candidates`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| exchange | string | `SH` / `SZ` |
+| board | string | `MAIN` / `STAR` / `CHINEXT` |
+| rule_source_url | string | URL |
+| candidate_text | string | 官方原文片段 |
+| parsed_buy_min_qty | int 或 null | 股 |
+| parsed_buy_qty_step | int 或 null | 股 |
+| parse_status | string | `PARSED` / `AMBIGUOUS` / `FAILED` |
+| message | string |  |
+| retrieved_at | datetime | ISO 8601，含时区 |
+
+### 16. 成分股板块与规则匹配 `df_component_rules`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| stock_code | string | 六位代码 |
+| stock_name | string |  |
+| csi_exchange | string | 官方交易所名称 |
+| inferred_board | string | `MAIN` / `STAR` / `CHINEXT` |
+| xt_exchange | string | 迅投原始值 |
+| xt_board | string 或 null | 迅投原始值 |
+| cross_check_status | string | `MATCHED` / `CONFLICT` / `UNKNOWN` |
+| buy_min_qty | int | 股 |
+| buy_qty_step | int | 股 |
+| rule_source_url | string | URL |
+| run_id | string | `YYYYMMDD_HHMMSS` |
+
+### 17. 构建日行情快照 `df_market_snapshot`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| instrument_code | string | 带市场后缀 |
+| instrument_type | string | `INDEX` / `STOCK` |
+| instrument_name | string 或 null |  |
+| trade_date | date | `YYYY-MM-DD` |
+| close_price | float | 未复权，人民币元或指数点位 |
+| source | string | 迅投接口名称 |
+| retrieved_at | datetime | ISO 8601，含时区 |
+| run_id | string | `YYYYMMDD_HHMMSS` |
+
+### 18. 校验报告 `validation_report`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| check_name | string | 稳定校验标识 |
+| level | string | `ERROR` / `WARNING` / `INFO` |
+| status | string | `PASS` / `FAIL` |
+| actual_value | string | 标量、列表或 JSON 序列化文本 |
+| expected_value | string | 标量、列表或 JSON 序列化文本 |
+| tolerance | string | 例如 `<=1 percentage point`；无则为空 |
+| message | string |  |
+| checked_at | datetime | ISO 8601，含时区 |
+| run_id | string | `YYYYMMDD_HHMMSS` |
+
+### 19. 理论股票篮子 `df_theoretical_portfolio`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| stock_code | string | 六位代码 |
+| stock_name | string |  |
+| exchange | string | `SH` / `SZ` |
+| board | string | `MAIN` / `STAR` / `CHINEXT` |
+| raw_weight_pct | float | 百分数数值 |
+| raw_weight | float | 小数，例如 `0.05147` |
+| close_price | float | 未复权，人民币元 |
+| target_stock_value | float | 人民币元，保留至少 2 位小数 |
+| theoretical_amount | float | 人民币元，保留至少 2 位小数 |
+| theoretical_qty | float | 股，保留足够计算精度 |
+| buy_min_qty | int | 股 |
+| buy_qty_step | int | 股 |
+| build_date | date | `YYYY-MM-DD` |
+| run_id | string | `YYYYMMDD_HHMMSS` |
+
+### 20. 理论组合摘要 `theoretical_portfolio_summary`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| index_close | float | 指数点位 |
+| index_units | int |  |
+| contract_multiplier | float |  |
+| target_stock_value | float | 人民币元，保留至少 2 位小数 |
+| raw_weight_sum_pct | float | 百分数数值 |
+| theoretical_amount_sum | float | 人民币元，保留至少 2 位小数 |
+
+### 21. 目标股票篮子 `df_target_portfolio`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| stock_code | string | 六位代码 |
+| stock_name | string |  |
+| raw_weight_pct | float | 百分数数值 |
+| raw_weight | float | 小数 |
+| close_price | float | 未复权，人民币元 |
+| theoretical_amount | float | 人民币元 |
+| theoretical_qty | float | 股 |
+| buy_min_qty | int | 股 |
+| buy_qty_step | int | 股 |
+| initial_floor_qty | int | 股 |
+| greedy_added_qty | int | 股 |
+| target_qty | int | 股 |
+| target_market_value | float | 人民币元，保留至少 2 位小数 |
+| is_held | bool | `true` / `false` |
+| run_id | string | `YYYYMMDD_HHMMSS` |
+
+### 22. 贪心步骤日志 `greedy_steps`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| step_no | int | 从 `1` 开始 |
+| stock_code | string | 六位代码 |
+| qty_before | int | 股 |
+| qty_added | int | 股 |
+| qty_after | int | 股 |
+| added_amount | float | 人民币元 |
+| error_before | float | 人民币元 |
+| error_after | float | 人民币元 |
+| error_improvement | float | 人民币元 |
+| cash_remaining | float | 人民币元 |
+| stop_reason | string 或 null | 仅最终停止记录填写 |
+
+### 23. 静态拟合偏差报告 `df_deviation_report`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| stock_code | string | 六位代码 |
+| stock_name | string |  |
+| raw_weight_pct | float | 百分数数值 |
+| raw_weight | float | 小数 |
+| close_price | float | 未复权，人民币元 |
+| theoretical_amount | float | 人民币元 |
+| theoretical_qty | float | 股 |
+| target_qty | int | 股 |
+| target_market_value | float | 人民币元 |
+| qty_deviation | float | 股 |
+| amount_deviation | float | 人民币元；目标减理论 |
+| absolute_amount_deviation | float | 人民币元 |
+| fund_weight | float | 小数 |
+| invested_weight | float | 小数 |
+| weight_deviation | float | 小数；`fund_weight - raw_weight` |
+| is_held | bool | `true` / `false` |
+| run_id | string | `YYYYMMDD_HHMMSS` |
+
+### 24. 组合摘要 `portfolio_summary`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| target_stock_value | float | 人民币元，保留至少 2 位小数 |
+| target_portfolio_market_value | float | 人民币元，保留至少 2 位小数 |
+| cash_balance | float | 人民币元，保留至少 2 位小数 |
+| capital_utilization | float | 小数 |
+| total_absolute_amount_error | float | 人民币元，保留至少 2 位小数 |
+| max_single_absolute_amount_error | float | 人民币元，保留至少 2 位小数 |
+| active_share | float | 小数 |
+| held_stock_count | int |  |
+| unheld_constituent_count | int |  |
+| greedy_step_count | int |  |
+| greedy_stop_reason | string |  |
+
+### 25. 运行摘要 `run_summary`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| run_id | string | `YYYYMMDD_HHMMSS` |
+| run_status | string | `SUCCESS` / `REVIEW_REQUIRED` / `FAILED` |
+| index_code | string | 六位代码 |
+| xt_index_code | string | 带市场后缀 |
+| index_exchange | string | `SH` / `SZ` |
+| run_date | date | `YYYY-MM-DD` |
+| build_date | date | `YYYY-MM-DD` |
+| index_close | float | 指数点位 |
+| index_units | int |  |
+| contract_multiplier | float |  |
+| target_stock_value | float | 人民币元 |
+| target_portfolio_market_value | float | 人民币元 |
+| cash_balance | float | 人民币元 |
+| capital_utilization | float | 小数 |
+| total_absolute_amount_error | float | 人民币元 |
+| active_share | float | 小数 |
+| validation_error_count | int |  |
+| validation_warning_count | int |  |
+| started_at | datetime | ISO 8601，含时区 |
+| finished_at | datetime | ISO 8601，含时区 |
+
+### 26. 输出路径 `output_paths`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| run_dir | string | 绝对路径 |
+| report_xlsx | string | 绝对路径 |
+| csv_dir | string | 绝对路径 |
+| raw_dir | string | 绝对路径 |
+| debug_dir | string | 绝对路径 |
+| log_path | string | 绝对路径 |
+| validation_report_csv | string | 绝对路径 |
+| run_summary_csv | string | 绝对路径 |
+| theoretical_portfolio_csv | string | 绝对路径 |
+| target_portfolio_csv | string | 绝对路径 |
+| deviation_report_csv | string | 绝对路径 |
+| portfolio_summary_csv | string | 绝对路径 |
+| index_weights_csv | string | 绝对路径 |
+| index_cons_csv | string | 绝对路径 |
+| index_constituents_check_csv | string | 绝对路径 |
+| market_snapshot_csv | string | 绝对路径 |
+| security_rules_csv | string | 绝对路径 |
+| component_rules_csv | string | 绝对路径 |
+| etf_summary_csv | string | 绝对路径 |
+| etf_components_csv | string | 绝对路径 |
+| etf_failures_csv | string | 绝对路径 |
+| corporate_actions_csv | string | 绝对路径 |
+| corporate_action_failures_csv | string | 绝对路径 |
+| csi_closeweight_raw | string | 绝对路径，`.xls` 或 `.xlsx` |
+| csi_cons_raw | string | 绝对路径，`.xls` 或 `.xlsx` |
+| etf_raw_json | string | 绝对路径，JSON 文件 |
+| trading_rules_snapshot | string | 绝对路径，CSV 文件 |
+| trading_rule_candidates | string | 绝对路径，CSV 文件；未刷新规则时可不存在 |
+| trading_rule_official_sources_dir | string | 绝对路径 |
+| corporate_actions_snapshot | string | 绝对路径，CSV 文件 |
+| greedy_steps_csv | string 或 null | 绝对路径；`debug=False` 时为 `null` |
+
+### 27. 人工审核异常 `ManualReviewRequired`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| run_id | string | `YYYYMMDD_HHMMSS` |
+| message | string |  |
+| validation_report | DataFrame | 结构见“校验报告”字段表 |
+| output_paths | dict | 结构见“输出路径”字段表 |
+
+### 28. 输出文件清单
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| report.xlsx | Excel工作簿 | 多工作表，字段结构引用本节对应表 |
+| csv/run_summary.csv | CSV文件 | UTF-8-SIG；结构见“运行摘要” |
+| csv/validation_report.csv | CSV文件 | UTF-8-SIG；结构见“校验报告” |
+| csv/theoretical_portfolio.csv | CSV文件 | UTF-8-SIG；结构见“理论股票篮子” |
+| csv/target_portfolio.csv | CSV文件 | UTF-8-SIG；结构见“目标股票篮子” |
+| csv/deviation_report.csv | CSV文件 | UTF-8-SIG；结构见“静态拟合偏差报告” |
+| csv/portfolio_summary.csv | CSV文件 | UTF-8-SIG；键值表或单行宽表，结构见“组合摘要” |
+| csv/index_weights.csv | CSV文件 | UTF-8-SIG；结构见“CSI 指数样本权重” |
+| csv/index_cons.csv | CSV文件 | UTF-8-SIG；结构见“CSI 指数成分股” |
+| csv/index_constituents_check.csv | CSV文件 | UTF-8-SIG；结构见“指数成分校验” |
+| csv/market_snapshot.csv | CSV文件 | UTF-8-SIG；结构见“构建日行情快照” |
+| csv/security_rules.csv | CSV文件 | UTF-8-SIG；结构见“交易数量规则” |
+| csv/component_rules.csv | CSV文件 | UTF-8-SIG；结构见“成分股板块与规则匹配” |
+| csv/etf_summary.csv | CSV文件 | UTF-8-SIG；结构见“ETF 汇总” |
+| csv/etf_components.csv | CSV文件 | UTF-8-SIG；结构见“ETF 成分” |
+| csv/etf_failures.csv | CSV文件 | UTF-8-SIG；结构见“ETF 失败清单” |
+| csv/corporate_actions.csv | CSV文件 | UTF-8-SIG；结构见“除权除息信息” |
+| csv/corporate_action_failures.csv | CSV文件 | UTF-8-SIG；结构见“除权除息失败清单” |
+| debug/greedy_steps.csv | CSV文件 | UTF-8-SIG；仅 `debug=True`，结构见“贪心步骤日志” |
+| raw/csi/{index_code}_样本权重_{run_date}.xls | 原始Excel文件 | CSI 官方原始格式；扩展名可能为 `.xlsx` |
+| raw/csi/{index_code}_成分股_{run_date}.xls | 原始Excel文件 | CSI 官方原始格式；扩展名可能为 `.xlsx` |
+| raw/etf/etf_redemption_raw.json | JSON文件 | UTF-8，完整保存迅投原始返回 |
+| raw/corporate_actions/corporate_actions_snapshot.csv | CSV文件 | UTF-8-SIG；结构见“除权除息信息” |
+| raw/trading_rules/security_buy_rules.csv | CSV文件 | UTF-8-SIG；结构见“交易数量规则” |
+| raw/trading_rules/official_sources/* | 原始文件集合 | 官方网页、PDF或文本原文，保持原始格式 |
+| raw/trading_rules/parser_candidates.csv | CSV文件 | UTF-8-SIG；结构见“交易规则解析候选” |
+| run.log | 日志文件 | UTF-8 文本 |
+
+
+## 六、运行目录、日志与人工审核
 
 ### 1. 运行编号
 
@@ -212,24 +665,35 @@ outputs/<run_id>/
 定义自定义异常：
 
 ```python
-class ManualReviewRequired(Exception):
+class ManualReviewRequired(
+    message,
+    run_id,
+    validation_report,
+    output_paths,
+):
     ...
 ```
+
+异常构造输入：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| message | string | 必填 |
+| run_id | string | 必填，`YYYYMMDD_HHMMSS` |
+| validation_report | DataFrame | 字段结构见“校验报告 `validation_report`” |
+| output_paths | dict | 字段结构见“输出路径 `output_paths`” |
 
 关键异常发生时：
 
 1. 保存已经取得的原始数据、业务中间产物、日志和校验报告。
 2. 将运行状态设为 `REVIEW_REQUIRED`。
 3. 抛出 `ManualReviewRequired`。
-4. 异常对象至少携带：
-    - `run_id`
-    - `validation_report`
-    - `output_paths`
+4. 异常对象字段结构必须符合“人工审核异常 `ManualReviewRequired`”字段表。
 5. 不允许吞掉异常继续执行。
 6. 不支持从中间强制继续；人工修复问题后完整重跑。
 
 
-## 六、可参考的现有文件
+## 七、可参考的现有文件
 
 编写 Notebook 前，必须实际读取并参考：
 
@@ -262,7 +726,7 @@ from CSI.csiweb import download_csi_constituent, read_csi_file
 对无法确认的 XtQuant 接口或返回字段，不得凭空编造；必须通过现有文件、实际环境或最小探测代码确认。
 
 
-## 七、详细 Task 拆分
+## 八、详细 Task 拆分
 
 ### Task0：初始化运行环境
 
@@ -272,16 +736,18 @@ from CSI.csiweb import download_csi_constituent, read_csi_file
 initialize_runtime(output_root="outputs", debug=False)
 ```
 
+- 输入：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| output_root | string 或 Path | 可选，默认 `outputs`；相对项目根目录或绝对路径 |
+| debug | bool | 可选，默认 `false` |
+
 - 输出：
-    - `runtime_context` 字典，至少包含：
-        - `run_id`
-        - `run_status`
-        - `run_dir`
-        - `csv_dir`
-        - `raw_dir`
-        - `debug_dir`
-        - `log_path`
-        - `started_at`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| runtime_context | dict | 字段结构见“运行上下文 `runtime_context`” |
 - 要求：
     - 创建本次运行完整目录结构。
     - 配置日志。
@@ -295,6 +761,12 @@ initialize_runtime(output_root="outputs", debug=False)
 ```python
 run_minimum_self_tests(debug=False)
 ```
+
+- 输入：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| debug | bool | 可选，默认 `false` |
 
 - 描述：
     - 使用虚构的小型数据测试纯计算逻辑。
@@ -312,6 +784,11 @@ run_minimum_self_tests(debug=False)
     - 固定并列规则能产生可复现结果。
     - 权重合计误差超过 1 个百分点时产生 `ERROR`。
 - 不要求为交易规则网页爬虫编写自动测试。
+- 输出：
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| self_test_results | DataFrame | 字段结构见“最小自测结果 `self_test_results`” |
 
 
 ### Task2：初始化迅投连接
@@ -322,8 +799,19 @@ run_minimum_self_tests(debug=False)
 initialize_xtquant_connection(data_home="data", address_list=None, debug=False)
 ```
 
+- 输入：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| data_home | string 或 Path | 可选，默认 `data`；相对项目根目录或绝对路径 |
+| address_list | list[string] 或 null | 可选；每项格式为 `IP:PORT` |
+| debug | bool | 可选，默认 `false` |
+
 - 输出：
-    - 连接状态字典。
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| xtquant_connection_status | dict | 字段结构见“迅投连接状态 `xtquant_connection_status`” |
 - 要求：
     - 从环境变量读取 Token。
     - Token 不存在时抛出清晰异常。
@@ -342,12 +830,19 @@ get_csi_index_files(index_code, raw_csi_dir, debug=False)
 ```
 
 - 输入：
-    - 六位 `index_code`。
-    - 本次运行的 `raw/csi/` 目录。
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| index_code | string | 必填，六位指数代码 |
+| raw_csi_dir | string 或 Path | 必填，绝对路径或相对项目根目录路径 |
+| debug | bool | 可选，默认 `false` |
 - 输出：
-    - `df_index_weights`
-    - `df_index_cons`
-    - 原始文件路径字典。
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| df_index_weights | DataFrame | 字段结构见“CSI 指数样本权重 `df_index_weights`” |
+| df_index_cons | DataFrame | 字段结构见“CSI 指数成分股 `df_index_cons`” |
+| csi_file_paths | dict | 字段结构见“CSI 原始文件路径 `csi_file_paths`” |
 - 要求：
     - 每次运行都下载：
         - `download_type="closeweight"`
@@ -367,9 +862,20 @@ get_csi_index_files(index_code, raw_csi_dir, debug=False)
 validate_csi_index_data(df_index_weights, df_index_cons, debug=False)
 ```
 
+- 输入：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| df_index_weights | DataFrame | 字段结构见“CSI 指数样本权重 `df_index_weights`” |
+| df_index_cons | DataFrame | 字段结构见“CSI 指数成分股 `df_index_cons`” |
+| debug | bool | 可选，默认 `false` |
+
 - 输出：
-    - `df_index_constituents_check`
-    - 部分 `validation_report` 记录。
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| df_index_constituents_check | DataFrame | 字段结构见“指数成分校验 `df_index_constituents_check`” |
+| validation_records | DataFrame | 字段结构见“校验报告 `validation_report`” |
 - 要求：
     - 比较 `closeweight` 和 `cons` 的成分代码集合。
     - 任何不一致均产生 `ERROR`：
@@ -392,13 +898,19 @@ validate_csi_index_data(df_index_weights, df_index_cons, debug=False)
 resolve_index_market_and_build_date(index_code, df_index_weights, debug=False)
 ```
 
+- 输入：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| index_code | string | 必填，六位指数代码 |
+| df_index_weights | DataFrame | 字段结构见“CSI 指数样本权重 `df_index_weights`” |
+| debug | bool | 可选，默认 `false` |
+
 - 输出：
-    - `index_market_context` 字典，至少包含：
-        - 六位指数代码
-        - 迅投指数行情代码
-        - 指数所属交易所
-        - 程序运行日
-        - 构建日
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| index_market_context | dict | 字段结构见“指数市场上下文 `index_market_context`” |
 - 要求：
     - 根据公开指数资料识别指数所属交易所。
     - 无法唯一确定时暂停人工审核。
@@ -413,11 +925,21 @@ resolve_index_market_and_build_date(index_code, df_index_weights, debug=False)
 get_all_etf_redemption_lists(raw_etf_dir, debug=False)
 ```
 
+- 输入：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| raw_etf_dir | string 或 Path | 必填，绝对路径或相对项目根目录路径 |
+| debug | bool | 可选，默认 `false` |
+
 - 输出业务中间产物：
-    - `df_etf_summary`
-    - `df_etf_components`
-    - `df_etf_failures`
-    - 原始 JSON 文件路径。
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| df_etf_summary | DataFrame | 字段结构见“ETF 汇总 `df_etf_summary`” |
+| df_etf_components | DataFrame | 字段结构见“ETF 成分 `df_etf_components`” |
+| df_etf_failures | DataFrame | 字段结构见“ETF 失败清单 `df_etf_failures`” |
+| etf_raw_json_path | string | 绝对路径，JSON 文件 |
 - 要求：
     - 每次运行必须调用 `xtdata.download_etf_info()` 强制刷新。
     - 使用 `xtdata.get_etf_info()` 获取全市场 ETF 数据。
@@ -440,9 +962,21 @@ get_all_etf_redemption_lists(raw_etf_dir, debug=False)
 get_component_corporate_actions(stock_codes, build_date, raw_actions_dir, debug=False)
 ```
 
+- 输入：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| stock_codes | list[string] | 必填，每项为带市场后缀的证券代码 |
+| build_date | date 或 string | 必填，`YYYY-MM-DD` 或 `YYYYMMDD` |
+| raw_actions_dir | string 或 Path | 必填，绝对路径或相对项目根目录路径 |
+| debug | bool | 可选，默认 `false` |
+
 - 输出业务中间产物：
-    - `df_corporate_actions`
-    - `df_corporate_action_failures`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| df_corporate_actions | DataFrame | 字段结构见“除权除息信息 `df_corporate_actions`” |
+| df_corporate_action_failures | DataFrame | 字段结构见“除权除息失败清单 `df_corporate_action_failures`” |
 - 查询范围：
     - 历史窗口：构建日前一个月至构建日。
     - 未来窗口：构建日后一个月。
@@ -463,8 +997,16 @@ get_component_corporate_actions(stock_codes, build_date, raw_actions_dir, debug=
 - 函数名：
 
 ```python
-get_security_buy_rules(refresh_trade_rules=False, debug=False)
+get_security_buy_rules(raw_trading_rules_dir, refresh_trade_rules=False, debug=False)
 ```
+
+- 输入：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| raw_trading_rules_dir | string 或 Path | 必填，本次运行的 `raw/trading_rules/` 目录 |
+| refresh_trade_rules | bool | 可选，默认 `false` |
+| debug | bool | 可选，默认 `false` |
 
 - 共享规则文件：
 
@@ -472,17 +1014,14 @@ get_security_buy_rules(refresh_trade_rules=False, debug=False)
 data/trading_rules/security_buy_rules.csv
 ```
 
-- 固定字段至少包括：
+- 输出：
 
-```text
-exchange
-board
-buy_min_qty
-buy_qty_step
-rule_source_url
-rule_effective_date
-retrieved_at
-```
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| df_security_rules | DataFrame | 字段结构见“交易数量规则 `df_security_rules`” |
+| df_rule_parser_candidates | DataFrame | 字段结构见“交易规则解析候选 `df_rule_parser_candidates`”；使用本地快照且未刷新时可为空表 |
+| shared_rule_file_path | string | 绝对路径，CSV 文件 |
+| run_rule_snapshot_path | string | 绝对路径，CSV 文件 |
 
 - 第一版支持板块：
     - 上交所主板
@@ -509,8 +1048,19 @@ retrieved_at
 classify_boards_and_match_rules(df_index_weights, df_security_rules, debug=False)
 ```
 
+- 输入：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| df_index_weights | DataFrame | 字段结构见“CSI 指数样本权重 `df_index_weights`” |
+| df_security_rules | DataFrame | 字段结构见“交易数量规则 `df_security_rules`” |
+| debug | bool | 可选，默认 `false` |
+
 - 输出：
-    - `df_component_rules`
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| df_component_rules | DataFrame | 字段结构见“成分股板块与规则匹配 `df_component_rules`” |
 - 要求：
     - 使用 CSI 文件中的交易所信息和证券代码规则识别板块。
     - 与迅投证券详情交叉检查。
@@ -533,9 +1083,21 @@ get_build_date_close_snapshot(
 )
 ```
 
+- 输入：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| xt_index_code | string | 必填，带市场后缀，例如 `000016.SH` |
+| stock_codes | list[string] | 必填，每项为带市场后缀的证券代码 |
+| build_date | date 或 string | 必填，`YYYY-MM-DD` 或 `YYYYMMDD` |
+| debug | bool | 可选，默认 `false` |
+
 - 输出：
-    - `df_market_snapshot`
-    - 指数收盘点位。
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| df_market_snapshot | DataFrame | 字段结构见“构建日行情快照 `df_market_snapshot`” |
+| index_close | float | 指数点位 |
 - 要求：
     - 每次运行先刷新目标指数和全部成分股的历史行情。
     - 使用构建日未复权收盘价。
@@ -553,22 +1115,44 @@ get_build_date_close_snapshot(
 - 函数名：
 
 ```python
-validate_inputs(..., debug=False)
+validate_inputs(
+    df_index_weights,
+    df_index_cons,
+    df_index_constituents_check,
+    index_market_context,
+    df_etf_summary,
+    df_etf_failures,
+    df_corporate_action_failures,
+    df_component_rules,
+    df_market_snapshot,
+    index_units,
+    contract_multiplier,
+    debug=False,
+)
 ```
+
+- 输入：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| df_index_weights | DataFrame | 字段结构见“CSI 指数样本权重 `df_index_weights`” |
+| df_index_cons | DataFrame | 字段结构见“CSI 指数成分股 `df_index_cons`” |
+| df_index_constituents_check | DataFrame | 字段结构见“指数成分校验 `df_index_constituents_check`” |
+| index_market_context | dict | 字段结构见“指数市场上下文 `index_market_context`” |
+| df_etf_summary | DataFrame | 字段结构见“ETF 汇总 `df_etf_summary`” |
+| df_etf_failures | DataFrame | 字段结构见“ETF 失败清单 `df_etf_failures`” |
+| df_corporate_action_failures | DataFrame | 字段结构见“除权除息失败清单 `df_corporate_action_failures`” |
+| df_component_rules | DataFrame | 字段结构见“成分股板块与规则匹配 `df_component_rules`” |
+| df_market_snapshot | DataFrame | 字段结构见“构建日行情快照 `df_market_snapshot`” |
+| index_units | int | 必填，正整数 |
+| contract_multiplier | float | 必填，正数 |
+| debug | bool | 可选，默认 `false` |
 
 - 输出：
 
-```text
-validation_report[
-    check_name,
-    level,
-    status,
-    actual_value,
-    expected_value,
-    tolerance,
-    message
-]
-```
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| validation_report | DataFrame | 字段结构见“校验报告 `validation_report`” |
 
 - 校验级别：
     - `ERROR`：停止流程并进入人工审核。
@@ -605,31 +1189,29 @@ calculate_theoretical_portfolio(
 )
 ```
 
+- 输入：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| df_index_weights | DataFrame | 字段结构见“CSI 指数样本权重 `df_index_weights`” |
+| df_market_snapshot | DataFrame | 字段结构见“构建日行情快照 `df_market_snapshot`” |
+| index_close | float | 必填，正数指数点位 |
+| index_units | int | 必填，正整数 |
+| contract_multiplier | float | 必填，正数 |
+| debug | bool | 可选，默认 `false` |
+
 - 输出：
-    - `df_theoretical_portfolio`
-    - 理论组合摘要。
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| df_theoretical_portfolio | DataFrame | 字段结构见“理论股票篮子 `df_theoretical_portfolio`” |
+| theoretical_portfolio_summary | dict | 字段结构见“理论组合摘要 `theoretical_portfolio_summary`” |
 - 核心公式：
 
 ```text
 target_stock_value = index_close × contract_multiplier × index_units
 theoretical_amount_i = target_stock_value × raw_weight_i
 theoretical_qty_i = theoretical_amount_i ÷ stock_close_i
-```
-
-- `df_theoretical_portfolio` 至少包含：
-
-```text
-stock_code
-stock_name
-exchange
-board
-raw_weight
-close_price
-target_stock_value
-theoretical_amount
-theoretical_qty
-buy_min_qty
-buy_qty_step
 ```
 
 - 要求：
@@ -645,6 +1227,20 @@ buy_qty_step
 ```python
 build_target_portfolio_greedy(df_theoretical_portfolio, debug=False)
 ```
+
+- 输入：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| df_theoretical_portfolio | DataFrame | 字段结构见“理论股票篮子 `df_theoretical_portfolio`” |
+| debug | bool | 可选，默认 `false` |
+
+- 输出：
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| df_target_portfolio | DataFrame | 字段结构见“目标股票篮子 `df_target_portfolio`” |
+| greedy_steps | DataFrame 或 null | `debug=True` 时结构见“贪心步骤日志 `greedy_steps`”；否则为 `null` |
 
 - 描述：
     - 拟合算法是整个程序的核心策略模块。
@@ -727,31 +1323,23 @@ calculate_static_deviation(
 )
 ```
 
+- 输入：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| df_theoretical_portfolio | DataFrame | 字段结构见“理论股票篮子 `df_theoretical_portfolio`” |
+| df_target_portfolio | DataFrame | 字段结构见“目标股票篮子 `df_target_portfolio`” |
+| target_stock_value | float | 必填，人民币元，正数 |
+| debug | bool | 可选，默认 `false` |
+
 - 输出：
-    - `df_deviation_report`
-    - `portfolio_summary`
 
-#### 1. 单股票层面至少包含
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| df_deviation_report | DataFrame | 字段结构见“静态拟合偏差报告 `df_deviation_report`” |
+| portfolio_summary | dict | 字段结构见“组合摘要 `portfolio_summary`” |
 
-```text
-stock_code
-stock_name
-raw_weight
-close_price
-theoretical_amount
-theoretical_qty
-target_qty
-target_market_value
-qty_deviation
-amount_deviation
-absolute_amount_deviation
-fund_weight
-invested_weight
-weight_deviation
-is_held
-```
-
-#### 2. 权重口径
+#### 1. 权重口径
 
 ```text
 fund_weight = target_market_value / target_stock_value
@@ -767,20 +1355,6 @@ invested_weight = target_market_value / target_portfolio_market_value
 - `invested_weight` 仅用于观察已买股票内部结构。
 - 不作为主要拟合偏差口径。
 
-#### 3. 组合层面至少包含
-
-```text
-target_stock_value
-target_portfolio_market_value
-cash_balance
-capital_utilization
-total_absolute_amount_error
-max_single_absolute_amount_error
-active_share
-held_stock_count
-unheld_constituent_count
-```
-
 主动权重总量：
 
 ```text
@@ -793,34 +1367,63 @@ active_share = 0.5 × Σ |fund_weight_i - raw_weight_i|
 - 函数名：
 
 ```python
-generate_index_fitting_report(results, runtime_context, debug=False)
+generate_index_fitting_report(report_data, runtime_context, debug=False)
 ```
 
+- 输入：
+
+`report_data` 必须是结构稳定的字典，不得传入未命名的任意对象：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| report_data.run_summary | DataFrame | 字段结构见“运行摘要 `run_summary`” |
+| report_data.validation_report | DataFrame | 字段结构见“校验报告 `validation_report`” |
+| report_data.df_index_weights | DataFrame | 字段结构见“CSI 指数样本权重 `df_index_weights`” |
+| report_data.df_index_cons | DataFrame | 字段结构见“CSI 指数成分股 `df_index_cons`” |
+| report_data.df_index_constituents_check | DataFrame | 字段结构见“指数成分校验 `df_index_constituents_check`” |
+| report_data.df_market_snapshot | DataFrame | 字段结构见“构建日行情快照 `df_market_snapshot`” |
+| report_data.df_security_rules | DataFrame | 字段结构见“交易数量规则 `df_security_rules`” |
+| report_data.df_component_rules | DataFrame | 字段结构见“成分股板块与规则匹配 `df_component_rules`” |
+| report_data.df_etf_summary | DataFrame | 字段结构见“ETF 汇总 `df_etf_summary`” |
+| report_data.df_etf_components | DataFrame | 字段结构见“ETF 成分 `df_etf_components`” |
+| report_data.df_etf_failures | DataFrame | 字段结构见“ETF 失败清单 `df_etf_failures`” |
+| report_data.df_corporate_actions | DataFrame | 字段结构见“除权除息信息 `df_corporate_actions`” |
+| report_data.df_corporate_action_failures | DataFrame | 字段结构见“除权除息失败清单 `df_corporate_action_failures`” |
+| report_data.df_theoretical_portfolio | DataFrame | 字段结构见“理论股票篮子 `df_theoretical_portfolio`” |
+| report_data.df_target_portfolio | DataFrame | 字段结构见“目标股票篮子 `df_target_portfolio`” |
+| report_data.df_deviation_report | DataFrame | 字段结构见“静态拟合偏差报告 `df_deviation_report`” |
+| report_data.portfolio_summary | dict | 字段结构见“组合摘要 `portfolio_summary`” |
+| runtime_context | dict | 字段结构见“运行上下文 `runtime_context`” |
+| debug | bool | 可选，默认 `false` |
+
 - 输出：
-    - `output_paths` 字典。
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| output_paths | dict | 字段结构见“输出路径 `output_paths`” |
 - 必须生成：
     - 一个多工作表 Excel 汇总文件 `report.xlsx`。
     - 各 DataFrame 的 CSV 明细文件。
     - 原始数据文件。
     - `run.log`。
 - CSV 使用 `utf-8-sig` 编码，便于 Excel 打开。
-- Excel 至少包含以下工作表：
+- Excel 工作表及字段结构：
 
-```text
-运行摘要
-目标股票篮子
-偏差报告
-校验报告
-指数样本权重
-指数成分校验
-行情快照
-交易规则
-ETF汇总
-ETF成分
-ETF失败清单
-除权除息
-除权除息失败清单
-```
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| 运行摘要 | Excel工作表 | 字段结构见“运行摘要 `run_summary`” |
+| 目标股票篮子 | Excel工作表 | 字段结构见“目标股票篮子 `df_target_portfolio`” |
+| 偏差报告 | Excel工作表 | 字段结构见“静态拟合偏差报告 `df_deviation_report`” |
+| 校验报告 | Excel工作表 | 字段结构见“校验报告 `validation_report`” |
+| 指数样本权重 | Excel工作表 | 字段结构见“CSI 指数样本权重 `df_index_weights`” |
+| 指数成分校验 | Excel工作表 | 字段结构见“指数成分校验 `df_index_constituents_check`” |
+| 行情快照 | Excel工作表 | 字段结构见“构建日行情快照 `df_market_snapshot`” |
+| 交易规则 | Excel工作表 | 字段结构见“交易数量规则 `df_security_rules`” |
+| ETF汇总 | Excel工作表 | 字段结构见“ETF 汇总 `df_etf_summary`” |
+| ETF成分 | Excel工作表 | 字段结构见“ETF 成分 `df_etf_components`” |
+| ETF失败清单 | Excel工作表 | 字段结构见“ETF 失败清单 `df_etf_failures`” |
+| 除权除息 | Excel工作表 | 字段结构见“除权除息信息 `df_corporate_actions`” |
+| 除权除息失败清单 | Excel工作表 | 字段结构见“除权除息失败清单 `df_corporate_action_failures`” |
 
 - Excel 工作表名称需要满足 Excel 长度限制。
 - 不生成图表。
@@ -839,6 +1442,28 @@ run_index_fitting(
     debug=False,
 )
 ```
+
+- 输入：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| index_code | string | 必填，六位指数代码，例如 `000016` |
+| index_units | int | 必填，正整数 |
+| contract_multiplier | float | 必填，正数 |
+| refresh_trade_rules | bool | 可选，默认 `false` |
+| debug | bool | 可选，默认 `false` |
+
+- 输出：
+
+| 字段名称 | 字段类型 | 输出格式 |
+|---|---|---|
+| run_summary | DataFrame | 字段结构见“运行摘要 `run_summary`” |
+| validation_report | DataFrame | 字段结构见“校验报告 `validation_report`” |
+| theoretical_portfolio | DataFrame | 字段结构见“理论股票篮子 `df_theoretical_portfolio`” |
+| target_portfolio | DataFrame | 字段结构见“目标股票篮子 `df_target_portfolio`” |
+| deviation_report | DataFrame | 字段结构见“静态拟合偏差报告 `df_deviation_report`” |
+| portfolio_summary | dict | 字段结构见“组合摘要 `portfolio_summary`” |
+| output_paths | dict | 字段结构见“输出路径 `output_paths`” |
 
 - 固定执行顺序：
 
@@ -865,7 +1490,7 @@ run_index_fitting(
 - 只有全部强制数据交付项和校验通过后，才允许生成理论股票篮子和目标股票篮子。
 
 
-## 八、Notebook 结构要求
+## 九、Notebook 结构要求
 
 Notebook 必须按以下顺序组织：
 
@@ -888,6 +1513,16 @@ REFRESH_TRADE_RULES = False
 DEBUG = False
 ```
 
+参数配置字段：
+
+| 字段名称 | 字段类型 | 输入格式 |
+|---|---|---|
+| INDEX_CODE | string | 六位指数代码，例如 `000016` |
+| INDEX_UNITS | int | 正整数 |
+| CONTRACT_MULTIPLIER | float | 正数 |
+| REFRESH_TRADE_RULES | bool | `true` / `false` |
+| DEBUG | bool | `true` / `false` |
+
 8. 最后一个单元格默认调用：
 
 ```python
@@ -903,7 +1538,7 @@ results = run_index_fitting(
 9. 展示主函数返回的核心结果表和摘要，不展示完整大型 ETF 明细。
 
 
-## 九、关键校验与失败规则汇总
+## 十、关键校验与失败规则汇总
 
 以下情况必须产生 `ERROR`、保存证据并抛出 `ManualReviewRequired`：
 
@@ -936,7 +1571,7 @@ results = run_index_fitting(
 - 贪心停止后存在现金余额：属于合法结果。
 
 
-## 十、编码质量要求
+## 十一、编码质量要求
 
 - 使用 Python 类型注解。
 - 使用清晰的中文 docstring 和必要注释。
@@ -960,7 +1595,7 @@ results = run_index_fitting(
 - 拟合算法必须封装为独立策略函数，便于未来替换。
 
 
-## 十一、第一版必须回答的业务问题
+## 十二、第一版必须回答的业务问题
 
 程序最终结果必须能够回答：
 
@@ -981,7 +1616,7 @@ results = run_index_fitting(
 15. 是否存在需要人工审核的异常或警告？
 
 
-## 十二、验收标准
+## 十三、验收标准
 
 - 实际生成完整的 `股指拟合.ipynb`。
 - Notebook JSON 格式有效。
@@ -1007,7 +1642,7 @@ results = run_index_fitting(
 - 程序不包含任何真实 Token、账号、密码或签名 URL。
 
 
-## 十三、生成程序时的执行要求
+## 十四、生成程序时的执行要求
 
 - 编写前先检查当前根目录中参考文件的真实内容和字段。
 - 对无法确认的 XtQuant 接口，不得凭空编造。
