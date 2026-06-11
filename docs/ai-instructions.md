@@ -233,8 +233,6 @@ class ManualReviewRequired(Exception):
 
 编写 Notebook 前，必须实际读取并参考：
 
-- `工作.txt`
-- `功能说明.txt`
 - `fetch_xtquant_data.py`
 - `XtQuant.ipynb`
 - `CSI/main.py`
@@ -250,8 +248,7 @@ class ManualReviewRequired(Exception):
 from CSI.csiweb import download_csi_constituent, read_csi_file
 ```
 
-- 不修改并运行 `CSI/main.py`。
-- 不复制 CSI 模块代码。
+- 不运行 `CSI/main.py`。
 - 新编写的其他核心逻辑全部放在 `股指拟合.ipynb` 中，不额外创建新的 Python 模块。
 
 已验证的迅投思路：
