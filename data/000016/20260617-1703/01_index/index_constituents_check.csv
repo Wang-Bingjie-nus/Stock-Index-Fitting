@@ -1,0 +1,2 @@
+﻿weight_count,cons_count,closeweight_data_date,cons_data_date,only_in_weights,only_in_cons,is_consistent,closeweight_path,cons_path,import_time
+50,50,2026-05-29,2026-06-16,600104.SH|600690.SH|601225.SH|601816.SH|601985.SH,600089.SH|600183.SH|601600.SH|601688.SH|603986.SH,False,E:\Codex\系统\Stock-Index-Fitting\data\000016\20260617-1703\01_index\000016_样本权重_20260617.xls,E:\Codex\系统\Stock-Index-Fitting\data\000016\20260617-1703\01_index\000016_成分股_20260617.xls,20260617-1703
