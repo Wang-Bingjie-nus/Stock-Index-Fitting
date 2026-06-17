@@ -1,0 +1,5 @@
+exchange,board,buy_min_qty,buy_qty_step
+SH,MAIN,100,100
+SH,STAR,200,1
+SZ,MAIN,100,100
+SZ,CHINEXT,100,100
