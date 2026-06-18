@@ -26,16 +26,7 @@ venv/
 Thumbs.db
 
 # Local data and runtime artifacts
-data/raw/*
-data/interim/*
-data/processed/*
-!data/raw/.gitkeep
-!data/interim/.gitkeep
-!data/processed/.gitkeep
-logs/*
-outputs/*
-!logs/.gitkeep
-!outputs/.gitkeep
+data/
 
 # Office temporary files
 ~$*
