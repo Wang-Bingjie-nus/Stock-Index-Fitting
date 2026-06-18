@@ -19,6 +19,15 @@ SQL_ETF_LIST = "COMMON_SSE_PL_ETFGGSGSHQD_L"
 SQL_ETF_BASIC = "COMMON_SSE_CP_JJLB_ETFJJGK_GGSGSHQD_JBXX_C"
 SQL_ETF_COMPONENTS = "COMMON_SSE_CP_JJLB_ETFJJGK_GGSGSHQD_COMPONENT_C"
 
+DEFAULT_STOCK_ETF_CLASSES = ("01", "03", "08", "09")
+
+SSE_ETF_CLASS_NAME_MAP = {
+    "01": "单市场股票（沪）ETF",
+    "03": "跨市场股票（沪深京）ETF",
+    "08": "跨市场股票（沪港深京）ETF",
+    "09": "股票（科创板/含科创板）ETF",
+}
+
 # 上证50相关 ETF（上交所挂牌，关键词检索的补充）
 DEFAULT_SSE50_ETF_CODES = [
     "510050",  # 华夏上证50ETF
@@ -105,38 +114,98 @@ class SseEtfPcfScraper:
             raise RuntimeError(f"SSE 接口返回错误: {data.get('actionErrors')}")
         return data
 
-    def search_etf_codes(self, keywords: str = "上证50", page_size: int = 25) -> list[dict[str, str]]:
-        """按关键字搜索 ETF 列表（股票 ETF 类别）。"""
+    # def search_etf_codes(self, keywords: str = "上证50", page_size: int = 25) -> list[dict[str, str]]:
+    #     """按关键字搜索 ETF 列表（股票 ETF 类别）。"""
+    #     print('search_etf_codes', keywords)
+    #     self._warm_up()
+    #     params = {
+    #         "sqlId": SQL_ETF_LIST,
+    #         "isPagination": "true",
+    #         "ETF_CLASS": "01",
+    #         "type": "inParams",
+    #         "KEY_WORDS": keywords,
+    #         "FUND_CODE": "",
+    #         "pageHelp.pageSize": str(page_size),
+    #         "pageHelp.pageNo": "1",
+    #         "pageHelp.beginPage": "1",
+    #         "pageHelp.endPage": "1",
+    #     }
+    #     data = self._query(params)
+    #     rows = data.get("result") or []
+    #     out: list[dict[str, str]] = []
+    #     for row in rows:
+    #         code = str(row.get("FUNDID2", "")).strip()
+    #         if not code:
+    #             continue
+    #         out.append(
+    #             {
+    #                 "etf_code": code,
+    #                 "etf_name": str(row.get("ETF_FULLNAME", "")).strip(),
+    #                 "fund_company": str(row.get("FUND_COMP_NAME", "")).strip(),
+    #                 "trading_day": _format_trading_day(row.get("TRADING_DAY", "")),
+    #                 "nav": _clean_text(row.get("NAV", "")),
+    #             }
+    #         )
+    #     return out
+    
+    def search_etf_codes(
+        self,
+        keywords: str = "",
+        etf_classes: tuple[str, ...] | list[str] = DEFAULT_STOCK_ETF_CLASSES,
+        page_size: int = 1000,
+    ) -> list[dict[str, str]]:
+        """先按多个 ETF_CLASS 拉取全量列表，再在本地按关键词过滤。"""
         self._warm_up()
-        params = {
-            "sqlId": SQL_ETF_LIST,
-            "isPagination": "true",
-            "ETF_CLASS": "01",
-            "type": "inParams",
-            "KEY_WORDS": keywords,
-            "FUND_CODE": "",
-            "pageHelp.pageSize": str(page_size),
-            "pageHelp.pageNo": "1",
-            "pageHelp.beginPage": "1",
-            "pageHelp.endPage": "1",
-        }
-        data = self._query(params)
-        rows = data.get("result") or []
+
+        keyword_text = str(keywords or "").strip().lower()
         out: list[dict[str, str]] = []
-        for row in rows:
-            code = str(row.get("FUNDID2", "")).strip()
-            if not code:
-                continue
-            out.append(
-                {
-                    "etf_code": code,
-                    "etf_name": str(row.get("ETF_FULLNAME", "")).strip(),
-                    "fund_company": str(row.get("FUND_COMP_NAME", "")).strip(),
-                    "trading_day": _format_trading_day(row.get("TRADING_DAY", "")),
-                    "nav": _clean_text(row.get("NAV", "")),
-                }
-            )
-        return out
+        seen_codes: set[str] = set()
+
+        for etf_class in etf_classes:
+            params = {
+                "sqlId": SQL_ETF_LIST,
+                "isPagination": "true",
+                "ETF_CLASS": etf_class,
+                "type": "inParams",
+                "KEY_WORDS": "",
+                "FUND_CODE": "",
+                "pageHelp.pageSize": str(page_size),
+                "pageHelp.pageNo": "1",
+                "pageHelp.beginPage": "1",
+                "pageHelp.endPage": "1",
+            }
+            data = self._query(params)
+            rows = data.get("result") or data.get("pageHelp", {}).get("data") or []
+
+            for row in rows:
+                code = str(row.get("FUNDID2", "")).strip()
+                if not code or code in seen_codes:
+                    continue
+
+                etf_name = str(row.get("ETF_FULLNAME", "")).strip()
+                short_name = str(row.get("SECURITY_ABBR_A", "") or row.get("FUND_NAME", "")).strip()
+                fund_company = str(row.get("FUND_COMP_NAME", "")).strip()
+
+                searchable = " ".join([code, etf_name, short_name, fund_company]).lower()
+                if keyword_text and keyword_text not in searchable:
+                    continue
+
+                seen_codes.add(code)
+                out.append(
+                    {
+                        "etf_code": code,
+                        "etf_name": etf_name,
+                        "etf_short_name": short_name,
+                        "fund_company": fund_company,
+                        "trading_day": _format_trading_day(row.get("TRADING_DAY", "")),
+                        "nav": _clean_text(row.get("NAV", "")),
+                        "etf_class": str(row.get("ETF_CLASS", etf_class)).strip(),
+                        "etf_class_name": SSE_ETF_CLASS_NAME_MAP.get(str(row.get("ETF_CLASS", etf_class)).strip(), ""),
+                        "etf_type": str(row.get("ETF_TYPE", "")).strip(),
+                    }
+                )
+
+        return sorted(out, key=lambda x: x["etf_code"])
 
     def fetch_basic_info(self, fund_id: str) -> dict[str, Any]:
         data = self._query(
@@ -250,10 +319,27 @@ class SseEtfPcfScraper:
         return df_components, df_basic, raw_payloads
 
 
-def resolve_sse50_etf_codes(scraper: SseEtfPcfScraper, keywords: str = "上证50") -> tuple[list[str], dict[str, str]]:
-    found = scraper.search_etf_codes(keywords=keywords)
+# def resolve_sse50_etf_codes(scraper: SseEtfPcfScraper, keywords: str = "上证50") -> tuple[list[str], dict[str, str]]:
+#     print('resolve_sse50_etf_codes', keywords)
+#     found = scraper.search_etf_codes(keywords=keywords)
+#     name_map = {item["etf_code"]: item["etf_name"] for item in found}
+#     codes = sorted(set(name_map) | set(DEFAULT_SSE50_ETF_CODES))
+#     return codes, name_map
+
+def resolve_sse50_etf_codes(
+    scraper: SseEtfPcfScraper,
+    keywords: str = "上证50",
+    etf_classes: tuple[str, ...] | list[str] = DEFAULT_STOCK_ETF_CLASSES,
+) -> tuple[list[str], dict[str, str]]:
+    found = scraper.search_etf_codes(keywords=keywords, etf_classes=etf_classes)
     name_map = {item["etf_code"]: item["etf_name"] for item in found}
-    codes = sorted(set(name_map) | set(DEFAULT_SSE50_ETF_CODES))
+
+    # 仅在上证50场景保留手工兜底；其他指数不要混入上证50 ETF。
+    if str(keywords).strip() == "上证50":
+        codes = sorted(set(name_map) | set(DEFAULT_SSE50_ETF_CODES))
+    else:
+        codes = sorted(name_map)
+
     return codes, name_map
 
 
