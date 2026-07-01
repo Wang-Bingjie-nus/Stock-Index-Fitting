@@ -35,7 +35,7 @@ from .dataset_layout import build_run_paths
 from .sse_etf_pcf_scraper import SseEtfPcfScraper, print_preview, resolve_sse50_etf_codes, save_outputs
 from .szse_etf_pcf import fetch_szse_pcf
 from .exposure_deviation import calculate_exposure_deviation
-from .tick_analysis import build_index_tick, compute_tracking_error, plot_tracking
+from .tick_analysis import build_index_tick, compute_tracking_error, plot_tracking, build_basket_ticks
 from .downloader_v02 import download_csi_constituent_v02
 
 
@@ -56,5 +56,5 @@ __all__ = [
     'build_index_tick',
     'compute_tracking_error',
     'plot_tracking',
-    
+    'build_basket_ticks'
 ]
