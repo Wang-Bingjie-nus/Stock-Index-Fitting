@@ -29,5 +29,7 @@ Thumbs.db
 data/
 
 # Office temporary files
+etf_script.py
+etf_pcf_script.txt
 ~$*
 
