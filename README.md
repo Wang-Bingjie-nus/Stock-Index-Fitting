@@ -9,3 +9,19 @@
 ## 正在进行
 - 深交所ETF申赎清单爬虫
 - 上次提到的偏差分析代码
+
+**2026-07-08**
+
+## 补充历史主要更新：
+- 使用fitting_date_ls、real_index_price_caliber、real_index_amount_mode作为可调参数
+- 加入除权除息
+
+## 更新内容：
+- 新增权重清单推算
+- 新增ETF PCF倒推权重清单，使用using_etf参数控制
+- 将target_amount设为金额，而非手数与合约乘数
+- 将target_amount作为贪心算法继续运行的硬性要求
+
+## 正在进行
+- 多目标贪心函数设计
+- 指定日期的rebalance操作

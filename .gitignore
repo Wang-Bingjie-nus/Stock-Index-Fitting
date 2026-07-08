@@ -26,7 +26,10 @@ venv/
 Thumbs.db
 
 # Local data and runtime artifacts
-data/
+data/**
+!data/
+!data/000300/
+!data/000300/_tick_cache*
 
 # Office temporary files
 etf_script.py

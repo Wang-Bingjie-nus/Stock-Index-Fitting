@@ -29,15 +29,14 @@ from .reader import read_daily_data, read_sector_ticks, read_stocks_ticks, parse
 from .file_utils import get_tick_file_path, get_daybar_file_path
 # from .downloader import download_csi_constituent
 from .csi_reader import read_csi_file
-from .db_query import safe_query
+from .db_query import safe_query as gogoal_query
 from .quick_query import quick_query
 from .dataset_layout import build_run_paths
 from .sse_etf_pcf_scraper import SseEtfPcfScraper, print_preview, resolve_sse50_etf_codes, save_outputs
 from .szse_etf_pcf import fetch_szse_pcf
 from .exposure_deviation import calculate_exposure_deviation
-# from .tick_analysis import build_index_tick, compute_tracking_error, plot_tracking, build_basket_ticks
 from .downloader_v02 import download_csi_constituent_v02
-
+from .tick_analysis_v7 import build_corporate_action_quantity_schedule, build_minute_tracking_analysis, combine_minute_tracking_results, save_tracking_outputs
 
 __all__ = [
     'read_daily_data',
@@ -48,13 +47,15 @@ __all__ = [
     'parse_date',
     'download_csi_constituent', 
     'read_csi_file',
-    'safe_query', 
+    'gogoal_query', 
     'quick_query',
     'build_run_paths',
     'fetch_szse_pcf',
     'calculate_exposure_deviation',
-    'build_index_tick',
-    'compute_tracking_error',
+    'build_corporate_action_quantity_schedule',
+    'build_minute_tracking_analysis',
+    'combine_minute_tracking_results',
+    'save_tracking_outputs',
     'plot_tracking',
     'build_basket_ticks'
 ]
