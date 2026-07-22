@@ -36,7 +36,7 @@ from .sse_etf_pcf_scraper import SseEtfPcfScraper, print_preview, resolve_sse50_
 from .szse_etf_pcf import fetch_szse_pcf
 from .exposure_deviation import calculate_exposure_deviation
 from .downloader_v02 import download_csi_constituent_v02
-from .tick_analysis_v7 import build_corporate_action_quantity_schedule, build_minute_tracking_analysis, combine_minute_tracking_results, save_tracking_outputs
+from .tick_analysis_v10 import build_corporate_action_quantity_schedule, build_minute_tracking_analysis, combine_minute_tracking_results, save_tracking_outputs
 
 __all__ = [
     'read_daily_data',

@@ -9,7 +9,7 @@ import pandas as pd
 
 from .csi_reader import read_csi_file
 from .downloader_v02 import download_csi_constituent_v02
-from .tick_analysis_v7 import standardize_corporate_actions
+from .tick_analysis_v10 import standardize_corporate_actions
 
 
 CSI_CODE_FIELD = "成份券代码Constituent Code"
@@ -28,6 +28,15 @@ class ProjectionOutput:
     target_path: Path
     trace_dir: Path | None
     summary_path: Path
+
+
+@dataclass
+class WeightSourceSelection:
+    weights: pd.DataFrame
+    source_path: Path
+    source_date: str
+    selection_mode: str
+    latest_source_date: str
 
 
 def normalize_stock_code(value) -> str:
@@ -105,6 +114,16 @@ def standardize_weight_frame(raw_weights: pd.DataFrame, *, source_path: str | Pa
         else:
             raise RuntimeError("standardized weight CSV must contain closeweight_data_date.")
         out["raw_weight_pct"] = pd.to_numeric(out["raw_weight_pct"], errors="coerce")
+    elif {"stock_code", "weight_pct"} <= set(frame.columns):
+        date_col = "trade_date" if "trade_date" in frame.columns else "date" if "date" in frame.columns else None
+        if date_col is None:
+            raise RuntimeError("historical weight CSV must contain trade_date or date.")
+        out = pd.DataFrame({
+            "stock_code": frame["stock_code"].map(normalize_stock_code),
+            "stock_name": frame.get("stock_name", pd.Series("", index=frame.index)).astype(str).str.strip(),
+            "raw_weight_pct": pd.to_numeric(frame["weight_pct"], errors="coerce"),
+            "closeweight_data_date": frame[date_col].map(normalize_date_key),
+        })
     else:
         missing = [col for col in (CSI_CODE_FIELD, CSI_NAME_FIELD, CSI_WEIGHT_FIELD) if col not in frame.columns]
         if missing:
@@ -127,7 +146,21 @@ def standardize_weight_frame(raw_weights: pd.DataFrame, *, source_path: str | Pa
         raise RuntimeError(f"weight source contains duplicate stock codes: {dup[:10]}")
     if (out["raw_weight_pct"] < 0).any():
         raise RuntimeError("weight source contains negative weights.")
+    source_dates = sorted(out["closeweight_data_date"].dropna().unique())
+    if len(source_dates) != 1:
+        raise RuntimeError(f"weight source date is not unique: {source_dates}")
     return out.sort_values("stock_code").reset_index(drop=True)
+
+
+def load_weight_source_file(file_path: str | Path) -> tuple[pd.DataFrame, Path]:
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    if path.suffix.lower() == ".csv":
+        raw = pd.read_csv(path)
+    else:
+        raw = read_csi_file(str(path))
+    return standardize_weight_frame(raw, source_path=path), path
 
 
 def load_or_download_weight_source(
@@ -141,20 +174,70 @@ def load_or_download_weight_source(
 
     if file_path:
         path = Path(file_path)
-        if not path.exists():
-            raise FileNotFoundError(path)
     else:
         downloaded = download_csi_constituent_v02(index_code, str(output_dir), "closeweight")
         if not downloaded:
             raise RuntimeError("CSI closeweight download failed.")
         path = Path(downloaded)
 
-    if path.suffix.lower() == ".csv":
-        raw = pd.read_csv(path)
-    else:
-        raw = read_csi_file(str(path))
-    weights = standardize_weight_frame(raw, source_path=path)
-    return weights, path
+    return load_weight_source_file(path)
+
+
+def select_weight_source_for_target(
+    *,
+    target_date: str,
+    latest_weights: pd.DataFrame,
+    latest_source_path: str | Path,
+    historical_weight_files: dict[str, str | Path],
+) -> WeightSourceSelection:
+    """Choose the nearest available source weight date on or before target_date.
+
+    The freshly downloaded CSI file remains authoritative whenever its embedded
+    weight date is on or before the target.  For an older target, only the local
+    historical files are considered.
+    """
+    target_date = normalize_date_key(target_date)
+    latest_source_path = Path(latest_source_path)
+    latest_weights = standardize_weight_frame(latest_weights, source_path=latest_source_path)
+    latest_source_date = normalize_date_key(latest_weights["closeweight_data_date"].iloc[0])
+
+    if latest_source_date <= target_date:
+        return WeightSourceSelection(
+            weights=latest_weights,
+            source_path=latest_source_path,
+            source_date=latest_source_date,
+            selection_mode="latest_download",
+            latest_source_date=latest_source_date,
+        )
+
+    configured_files = {
+        normalize_date_key(source_date): Path(path)
+        for source_date, path in historical_weight_files.items()
+    }
+    eligible_dates = sorted(source_date for source_date in configured_files if source_date <= target_date)
+    if not eligible_dates:
+        configured_dates = sorted(configured_files)
+        raise RuntimeError(
+            f"No historical weight source is available on or before target_date {target_date}. "
+            f"Configured historical dates: {configured_dates}"
+        )
+
+    selected_date = eligible_dates[-1]
+    selected_weights, selected_path = load_weight_source_file(configured_files[selected_date])
+    embedded_date = normalize_date_key(selected_weights["closeweight_data_date"].iloc[0])
+    if embedded_date != selected_date:
+        raise RuntimeError(
+            f"Historical weight file date mismatch: configured={selected_date}, "
+            f"embedded={embedded_date}, path={selected_path}"
+        )
+
+    return WeightSourceSelection(
+        weights=selected_weights,
+        source_path=selected_path,
+        source_date=selected_date,
+        selection_mode="historical_local",
+        latest_source_date=latest_source_date,
+    )
 
 
 def fetch_stock_closes_range(gogoal_query, stock_codes: list[str], start_date: str, end_date: str) -> pd.DataFrame:
@@ -301,8 +384,9 @@ def project_weights_by_close_and_actions(
 
         if trade_date == target_date:
             target_weights = frame
-        if i > 0:
-            trace[trade_date] = frame
+        # Include the reference-date frame so downloaded and projected weights
+        # are always available through the same 000300-YYYYMMDD.csv schema.
+        trace[trade_date] = frame
 
     if target_weights is None:
         raise RuntimeError(f"target_date {target_date} was not projected.")
@@ -330,8 +414,9 @@ def save_projection_outputs(
     source_path = output_dir / f"{index_code}-{target_date}-source_weights.csv"
     actions_path = output_dir / f"{index_code}-{target_date}-standardized_actions.csv"
 
-    # Save every projected trading day.  Each file uses the close price of that
-    # current_date and represents the estimated weights for the next index day.
+    # Save the reference date and every projected trading day in one schema.
+    # Each file uses current_date's close price and represents the estimated
+    # weights for the next index day.
     for current_date, frame in trace.items():
         frame.to_csv(output_dir / f"{index_code}-{current_date}.csv", index=False, encoding="utf-8-sig")
 

@@ -13,14 +13,10 @@ class GreedyScoreConfig:
     use_industry_error: bool = True
     use_size_error: bool = True
     use_covariance_error: bool = False
-    use_under_budget_penalty: bool = True
-    use_over_budget_penalty: bool = True
     amount_weight: float = 1.0
     industry_weight: float = 1.0
     size_weight: float = 1.0
     covariance_weight: float = 0.0
-    under_budget_weight: float = 20.0
-    over_budget_weight: float = 5.0
     max_over_budget_ratio: float = 1.005
 
 
@@ -255,15 +251,16 @@ def compute_score(qty: pd.Series | dict[str, float], matrices: ExposureMatrices,
     active_weight = state["active_weight"]
     invested_ratio = float(state["invested_ratio"])
 
-    amount_error = float((((amount - matrices.target_amount) / matrices.target_stock_value) ** 2).sum())
+    amount_diff = ((amount - matrices.target_amount) / matrices.target_stock_value).rename("amount_diff")
+    amount_error = float(amount_diff.abs().sum())
 
     portfolio_industry_weight = (portfolio_weight @ matrices.industry_matrix).rename("portfolio_industry_weight")
     industry_diff = portfolio_industry_weight - matrices.index_industry_weight
-    industry_error = float((industry_diff ** 2).sum())
+    industry_error = float(industry_diff.abs().sum())
 
     portfolio_size_weight = (portfolio_weight @ matrices.size_matrix).rename("portfolio_size_weight")
     size_diff = portfolio_size_weight - matrices.index_size_weight
-    size_error = float((size_diff ** 2).sum())
+    size_error = float(size_diff.abs().sum())
 
     covariance_error = 0.0
     if config.use_covariance_error:
@@ -273,22 +270,28 @@ def compute_score(qty: pd.Series | dict[str, float], matrices: ExposureMatrices,
         aw = active_weight.to_numpy(dtype=float)
         covariance_error = float(aw.T @ cov @ aw)
 
-    under_budget_penalty = float(max(0.0, 1.0 - invested_ratio) ** 2)
-    over_budget_penalty = float(max(0.0, invested_ratio - 1.0) ** 2)
+    under_budget_gap = float(max(0.0, 1.0 - invested_ratio))
+    over_budget_gap = float(max(0.0, invested_ratio - 1.0))
 
     total_score = 0.0
+    amount_score_contribution = 0.0
+    industry_score_contribution = 0.0
+    size_score_contribution = 0.0
+    covariance_score_contribution = 0.0
     if config.use_amount_error:
-        total_score += config.amount_weight * amount_error
+        amount_score_contribution = config.amount_weight * amount_error
+        total_score += amount_score_contribution
     if config.use_industry_error:
-        total_score += config.industry_weight * industry_error
+        industry_score_contribution = config.industry_weight * industry_error
+        total_score += industry_score_contribution
     if config.use_size_error:
-        total_score += config.size_weight * size_error
+        size_score_contribution = config.size_weight * size_error
+        total_score += size_score_contribution
     if config.use_covariance_error:
-        total_score += config.covariance_weight * covariance_error
-    if config.use_under_budget_penalty:
-        total_score += config.under_budget_weight * under_budget_penalty
-    if config.use_over_budget_penalty:
-        total_score += config.over_budget_weight * over_budget_penalty
+        covariance_score_contribution = config.covariance_weight * covariance_error
+        total_score += covariance_score_contribution
+
+    contribution_denom = abs(total_score) if abs(total_score) > 1e-15 else np.nan
 
     return {
         "total_score": float(total_score),
@@ -296,8 +299,16 @@ def compute_score(qty: pd.Series | dict[str, float], matrices: ExposureMatrices,
         "industry_error": industry_error,
         "size_error": size_error,
         "covariance_error": covariance_error,
-        "under_budget_penalty": under_budget_penalty,
-        "over_budget_penalty": over_budget_penalty,
+        "amount_score_contribution": float(amount_score_contribution),
+        "industry_score_contribution": float(industry_score_contribution),
+        "size_score_contribution": float(size_score_contribution),
+        "covariance_score_contribution": float(covariance_score_contribution),
+        "amount_score_contribution_pct": float(amount_score_contribution / contribution_denom) if np.isfinite(contribution_denom) else np.nan,
+        "industry_score_contribution_pct": float(industry_score_contribution / contribution_denom) if np.isfinite(contribution_denom) else np.nan,
+        "size_score_contribution_pct": float(size_score_contribution / contribution_denom) if np.isfinite(contribution_denom) else np.nan,
+        "covariance_score_contribution_pct": float(covariance_score_contribution / contribution_denom) if np.isfinite(contribution_denom) else np.nan,
+        "under_budget_gap": under_budget_gap,
+        "over_budget_gap": over_budget_gap,
         "invested_amount": float(state["invested_amount"]),
         "invested_ratio": invested_ratio,
         "portfolio_weight_sum": float(portfolio_weight.sum()),
@@ -320,8 +331,16 @@ def score_to_frame(score: dict) -> pd.DataFrame:
         "industry_error",
         "size_error",
         "covariance_error",
-        "under_budget_penalty",
-        "over_budget_penalty",
+        "amount_score_contribution",
+        "industry_score_contribution",
+        "size_score_contribution",
+        "covariance_score_contribution",
+        "amount_score_contribution_pct",
+        "industry_score_contribution_pct",
+        "size_score_contribution_pct",
+        "covariance_score_contribution_pct",
+        "under_budget_gap",
+        "over_budget_gap",
         "invested_amount",
         "invested_ratio",
         "portfolio_weight_sum",
