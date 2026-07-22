@@ -32,7 +32,7 @@ data/**
 !data/000300/_tick_cache*
 # !data/000300/_tick_cache*/*
 !data/weights_projection
-!data/weights_projection/*
+# !data/weights_projection/*
 
 # Office temporary files
 etf_script.py
