@@ -1,4 +1,4 @@
-﻿stock_code,stock_name,raw_weight_pct,closeweight_data_date,import_time
+﻿stock_code,stock_name,projected_weight_pct,closeweight_data_date,import_time
 000001.SZ,平安银行,0.386,2026-06-15,20260701-0918
 000002.SZ,万科A,0.077,2026-06-15,20260701-0918
 000063.SZ,中兴通讯,0.432,2026-06-15,20260701-0918

@@ -83,8 +83,9 @@ def build_intraday_log_return_matrix(
 
         if not price_columns:
             continue
-
-        prices = pd.DataFrame(price_columns).sort_index().reindex(columns=stock_codes).ffill()
+# 临时修改
+        # prices = pd.DataFrame(price_columns).sort_index().reindex(columns=stock_codes).ffill()
+        prices = pd.DataFrame(price_columns).sort_index().reindex(columns=stock_codes).ffill().bfill()
         log_returns = np.log(prices).diff().iloc[1:].ffill()
         if log_returns.empty:
             continue
