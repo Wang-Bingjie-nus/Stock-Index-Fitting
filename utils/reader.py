@@ -180,7 +180,7 @@ def read_stocks_ticks(date_input, stock_codes, base_dir=r'Z:\高频行情迅投\
                     df = file_data[stock_code]
                     if isinstance(df, pd.DataFrame):
                         result[stock_code] = df
-                        print(f"✓ {stock_code}: 读取成功")
+                        # print(f"✓ {stock_code}: 读取成功")
                     else:
                         result[stock_code] = None
                         print(f"✗ {stock_code}: 数据格式错误，不是DataFrame类型")
