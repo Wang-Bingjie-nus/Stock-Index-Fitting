@@ -423,6 +423,62 @@ def preview_generation_plan(
     return pd.DataFrame(rows)
 
 
+def select_complete_trade_dates(
+    plan: pd.DataFrame,
+    trade_dates: list[str] | tuple[str, ...],
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Keep only dates whose preview has no missing source or planning error."""
+
+    requested_dates = [normalize_trade_date(value) for value in trade_dates]
+    excluded_reasons: dict[str, list[str]] = {}
+
+    if not isinstance(plan, pd.DataFrame) or "trade_date" not in plan.columns:
+        return [], {
+            trade_date: ["No preview rows were produced for this date."]
+            for trade_date in requested_dates
+        }
+
+    normalized_plan = plan.copy()
+    normalized_plan["trade_date"] = normalized_plan["trade_date"].map(
+        lambda value: normalize_trade_date(value) if pd.notna(value) else ""
+    )
+
+    valid_dates = []
+    for trade_date in requested_dates:
+        date_rows = normalized_plan.loc[normalized_plan["trade_date"].eq(trade_date)]
+        reasons = []
+
+        if date_rows.empty:
+            reasons.append("No preview rows were produced for this date.")
+        else:
+            if "status" in date_rows.columns:
+                plan_errors = date_rows.loc[date_rows["status"].eq("plan_error")]
+                for error in plan_errors.get("error", pd.Series(dtype=object)).dropna():
+                    reasons.append(f"Preview planning error: {error}")
+
+            if "source_exists" not in date_rows.columns:
+                if not reasons:
+                    reasons.append("Preview rows do not contain source_exists information.")
+            else:
+                non_error_rows = date_rows
+                if "status" in date_rows.columns:
+                    non_error_rows = date_rows.loc[~date_rows["status"].eq("plan_error")]
+                source_exists = non_error_rows["source_exists"].astype("boolean").fillna(False)
+                missing_rows = non_error_rows.loc[~source_exists]
+                for source_path in missing_rows.get(
+                    "source_path",
+                    pd.Series(dtype=object),
+                ).fillna("<unknown source path>"):
+                    reasons.append(f"Missing source pickle: {source_path}")
+
+        if reasons:
+            excluded_reasons[trade_date] = reasons
+        else:
+            valid_dates.append(trade_date)
+
+    return valid_dates, excluded_reasons
+
+
 def _build_market_partition(task: MarketCacheTask) -> tuple[str, float]:
     """Worker entry point: read, reduce, transform and save one source pickle."""
 
@@ -857,6 +913,7 @@ def merge_partition_caches_for_range(
     cache_dir: str | Path,
     delete_partition_caches: bool = True,
     overwrite_complete_cache: bool = False,
+    excluded_trade_dates: list[str] | tuple[str, ...] | None = None,
 ) -> list[Path]:
     """Merge one algorithm-compatible complete cache per SH trading day."""
 
@@ -865,7 +922,22 @@ def merge_partition_caches_for_range(
         end_date,
         xtdata_client=xtdata_client,
     )
-    trade_dates = list(resolution.trade_dates)
+    excluded_date_set = {
+        normalize_trade_date(value)
+        for value in (excluded_trade_dates or [])
+    }
+    trade_dates = [
+        trade_date
+        for trade_date in resolution.trade_dates
+        if trade_date not in excluded_date_set
+    ]
+    skipped_dates = [
+        trade_date
+        for trade_date in resolution.trade_dates
+        if trade_date in excluded_date_set
+    ]
+    if skipped_dates:
+        print(f"Merge skipped incomplete dates: {skipped_dates}")
     print(
         f"Merge trading dates ({len(trade_dates)}): "
         f"{resolution.adjusted_start_date}..{resolution.adjusted_end_date}"
@@ -904,4 +976,5 @@ __all__ = [
     "preview_generation_plan",
     "resolve_csi300_weight_file",
     "resolve_trading_dates",
+    "select_complete_trade_dates",
 ]
