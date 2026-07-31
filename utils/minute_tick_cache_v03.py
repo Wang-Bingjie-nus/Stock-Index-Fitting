@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 import pickle
 import re
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -11,6 +13,8 @@ import pandas as pd
 
 CACHE_KIND = "basket_tick_v03"
 CACHE_SCHEMA_VERSION = 3
+UNAVAILABLE_CACHE_KIND = "basket_tick_unavailable_v1"
+UNAVAILABLE_CACHE_SCHEMA_VERSION = 1
 
 # The source is narrowed to these eight fields before any DataFrame copy.
 # ``time`` becomes the unique int64 index of the cached minute-wide table.
@@ -27,6 +31,95 @@ RAW_CACHE_COLUMNS = (
 CACHE_VALUE_FIELDS = RAW_CACHE_COLUMNS[1:]
 PRICE_FIELDS = ("lastPrice", "lastClose", "bidPrice1", "askPrice1")
 MINUTE_ALIGNMENT = "last_observation_at_or_before_minute_second_00"
+CONTINUOUS_TRADING_MINUTE_ROWS = 240
+
+
+def unavailable_minute_tick_cache_path(
+    cache_dir: str | Path,
+    trade_date: str,
+) -> Path:
+    """Return the date-level marker path for an unusable raw tick day."""
+
+    trade_date = normalize_trade_date(trade_date)
+    return Path(cache_dir) / f"basket_minute_unavailable_{trade_date}.pkl"
+
+
+def build_unavailable_minute_tick_cache(
+    trade_date: str,
+    *,
+    reason: str,
+    error_type: str | None = None,
+    details: dict[str, Any] | None = None,
+    stock_codes=None,
+    generated_by: str | None = None,
+) -> dict[str, Any]:
+    """Build a small structured marker for a date whose full cache is unavailable."""
+
+    trade_date = normalize_trade_date(trade_date)
+    reason = str(reason).strip()
+    if not reason:
+        raise ValueError("Unavailable cache reason must not be empty.")
+    return {
+        "metadata": {
+            "kind": UNAVAILABLE_CACHE_KIND,
+            "schema_version": UNAVAILABLE_CACHE_SCHEMA_VERSION,
+            "status": "unavailable",
+            "unavailable": True,
+            "trade_date": trade_date,
+            "reason": reason,
+            "error_type": None if error_type is None else str(error_type),
+            "details": dict(details or {}),
+            "stock_codes": normalize_stock_codes(stock_codes or []),
+            "generated_by": None if generated_by is None else str(generated_by),
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        },
+        "data": None,
+    }
+
+
+def is_unavailable_minute_tick_cache(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("metadata"), dict)
+        and value["metadata"].get("kind") == UNAVAILABLE_CACHE_KIND
+        and value["metadata"].get("status") == "unavailable"
+        and value.get("data") is None
+    )
+
+
+def validate_unavailable_minute_tick_cache(
+    marker: dict[str, Any],
+    *,
+    trade_date: str | None = None,
+) -> dict[str, Any]:
+    if not is_unavailable_minute_tick_cache(marker):
+        raise ValueError("Invalid unavailable minute tick cache marker.")
+    metadata = marker["metadata"]
+    if int(metadata.get("schema_version", -1)) != UNAVAILABLE_CACHE_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unexpected unavailable marker schema version: "
+            f"{metadata.get('schema_version')!r}."
+        )
+    marker_date = normalize_trade_date(metadata.get("trade_date"))
+    if trade_date is not None and marker_date != normalize_trade_date(trade_date):
+        raise ValueError(
+            f"Unavailable marker date mismatch: {marker_date} != "
+            f"{normalize_trade_date(trade_date)}."
+        )
+    if not str(metadata.get("reason", "")).strip():
+        raise ValueError("Unavailable marker reason is empty.")
+    return marker
+
+
+def load_unavailable_minute_tick_cache(
+    path: str | Path,
+    *,
+    trade_date: str | None = None,
+) -> dict[str, Any]:
+    path = Path(path)
+    with path.open("rb") as handle:
+        marker = pickle.load(handle)
+    return validate_unavailable_minute_tick_cache(marker, trade_date=trade_date)
 
 
 def normalize_stock_code(value) -> str:
@@ -55,17 +148,17 @@ def normalize_stock_codes(stock_codes) -> list[str]:
 
 
 def build_trading_minute_index(trade_date: str) -> pd.Index:
-    """Return the 242 minute-second-zero observations in the two A-share sessions."""
+    """Return the 240 continuous-trading minute-close timestamps for an A-share day."""
 
     trade_date = normalize_trade_date(trade_date)
     day = pd.Timestamp(trade_date)
     morning = pd.date_range(
-        day.replace(hour=9, minute=30),
+        day.replace(hour=9, minute=31),
         day.replace(hour=11, minute=30),
         freq="min",
     )
     afternoon = pd.date_range(
-        day.replace(hour=13, minute=0),
+        day.replace(hour=13, minute=1),
         day.replace(hour=15, minute=0),
         freq="min",
     )
@@ -73,7 +166,13 @@ def build_trading_minute_index(trade_date: str) -> pd.Index:
         morning.strftime("%Y%m%d%H%M%S").astype("int64"),
         afternoon.strftime("%Y%m%d%H%M%S").astype("int64"),
     ])
-    return pd.Index(values, dtype="int64", name="time")
+    result = pd.Index(values, dtype="int64", name="time")
+    if len(result) != CONTINUOUS_TRADING_MINUTE_ROWS:
+        raise RuntimeError(
+            "Continuous-trading minute index must contain "
+            f"{CONTINUOUS_TRADING_MINUTE_ROWS} rows, got {len(result)}."
+        )
+    return result
 
 
 def _time_to_int64(values: pd.Series) -> pd.Series:
@@ -228,6 +327,25 @@ def validate_minute_tick_cache(
     if missing_fields:
         raise ValueError(f"Minute tick cache is missing fields: {missing_fields}.")
 
+    cache_trade_date = normalize_trade_date(metadata.get("trade_date"))
+    expected_minute_index = build_trading_minute_index(cache_trade_date)
+    metadata_minute_rows = int(metadata.get("minute_rows", -1))
+    if metadata_minute_rows != CONTINUOUS_TRADING_MINUTE_ROWS:
+        raise ValueError(
+            "Cache metadata minute_rows must be "
+            f"{CONTINUOUS_TRADING_MINUTE_ROWS}, got {metadata_minute_rows}."
+        )
+    if len(wide) != CONTINUOUS_TRADING_MINUTE_ROWS:
+        raise ValueError(
+            "Minute tick cache data must contain "
+            f"{CONTINUOUS_TRADING_MINUTE_ROWS} rows, got {len(wide)}."
+        )
+    if not wide.index.equals(expected_minute_index):
+        raise ValueError(
+            "Minute tick cache index must exactly match the 240 continuous-trading "
+            "minute closes (09:31-11:30 and 13:01-15:00)."
+        )
+
     if trade_date is not None and metadata.get("trade_date") != normalize_trade_date(trade_date):
         raise ValueError(
             f"Cache trade date mismatch: {metadata.get('trade_date')} != {normalize_trade_date(trade_date)}."
@@ -264,19 +382,35 @@ def load_minute_tick_cache(
     path = Path(path)
     with path.open("rb") as handle:
         cache = pickle.load(handle)
+    if is_unavailable_minute_tick_cache(cache):
+        raise ValueError(
+            "Invalid minute tick cache object: the file is an unavailable-date marker."
+        )
     return validate_minute_tick_cache(cache, trade_date=trade_date, stock_codes=stock_codes)
 
 
-def save_minute_tick_cache(cache: dict, path: str | Path) -> Path:
-    validate_minute_tick_cache(cache)
+def _atomic_pickle_dump(value: Any, path: str | Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         with temporary_path.open("wb") as handle:
-            pickle.dump(cache, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
         temporary_path.replace(path)
     finally:
         if temporary_path.exists():
             temporary_path.unlink()
     return path
+
+
+def save_minute_tick_cache(cache: dict, path: str | Path) -> Path:
+    validate_minute_tick_cache(cache)
+    return _atomic_pickle_dump(cache, path)
+
+
+def save_unavailable_minute_tick_cache(
+    marker: dict[str, Any],
+    path: str | Path,
+) -> Path:
+    validate_unavailable_minute_tick_cache(marker)
+    return _atomic_pickle_dump(marker, path)

@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from .minute_tick_cache_v03 import (
+    CONTINUOUS_TRADING_MINUTE_ROWS,
     get_minute_field,
     normalize_stock_codes,
     validate_minute_tick_cache,
@@ -81,6 +82,11 @@ def build_intraday_log_return_matrix(
             copy=True,
         )
         prices = prices.apply(pd.to_numeric, errors="coerce")
+        if len(prices) != CONTINUOUS_TRADING_MINUTE_ROWS:
+            raise ValueError(
+                f"Risk model requires {CONTINUOUS_TRADING_MINUTE_ROWS} continuous-trading "
+                f"minute prices for {date_key}, got {len(prices)}."
+            )
 
         # 非正价格不视为有效市场价格
         prices = prices.where(prices.gt(0))
@@ -145,7 +151,8 @@ def build_intraday_log_return_matrix(
         # 全天缺失的股票已经在上面优先使用 lastClose。
         prices = prices.ffill().bfill()
 
-        # 每个交易日单独计算，不产生隔夜收益
+        # 240 个连续交易分钟价格在每个交易日内产生 239 条纯日内收益，
+        # 不引入昨收价，因此不混入隔夜和集合竞价收益。
         log_returns = np.log(prices).diff().iloc[1:].ffill()
 
         if log_returns.empty:
@@ -222,17 +229,28 @@ def build_shrunk_risk_model_from_minute_caches(
 def build_shrunk_risk_model_from_daily_loader(
     risk_dates: list[str],
     stock_codes: list[str],
-    daily_minute_cache_loader: Callable[[str], dict],
+    daily_minute_cache_loader: Callable[[str], dict | None],
     *,
     price_col: str = "lastPrice",
     half_life_days: float = 3.0,
+    min_valid_dates: int = 1,
 ) -> ShrunkRiskModel:
-    """Build a risk model while retaining only one minute cache per loop."""
+    """Build a risk model while skipping unavailable dates and streaming caches."""
 
     stock_codes = normalize_stock_codes(stock_codes)
+    requested_risk_dates = [str(risk_date) for risk_date in risk_dates]
+    min_valid_dates = int(min_valid_dates)
+    if min_valid_dates <= 0:
+        raise ValueError("min_valid_dates must be positive.")
+
     daily_return_frames = []
-    for risk_date in risk_dates:
+    used_risk_dates = []
+    skipped_risk_dates = []
+    for risk_date in requested_risk_dates:
         minute_cache = daily_minute_cache_loader(risk_date)
+        if minute_cache is None:
+            skipped_risk_dates.append(risk_date)
+            continue
         daily_returns = build_intraday_log_return_matrix(
             {str(risk_date): minute_cache},
             stock_codes,
@@ -241,7 +259,15 @@ def build_shrunk_risk_model_from_daily_loader(
         if daily_returns.empty:
             raise ValueError(f"Risk returns are empty for {risk_date}.")
         daily_return_frames.append(daily_returns)
+        used_risk_dates.append(risk_date)
         del minute_cache
+
+    if len(used_risk_dates) < min_valid_dates:
+        raise ValueError(
+            f"Risk model requires at least {min_valid_dates} valid risk dates; "
+            f"requested={requested_risk_dates}, used={used_risk_dates}, "
+            f"skipped={skipped_risk_dates}."
+        )
 
     returns = pd.concat(daily_return_frames, axis=0).reindex(columns=stock_codes)
     covariance, correlation, summary = build_ew_oas_covariance(
@@ -251,6 +277,10 @@ def build_shrunk_risk_model_from_daily_loader(
     summary["price_col"] = price_col
     summary["tick_cache_kind"] = "basket_tick_v03"
     summary["tick_loading"] = "daily_minute_cache_streaming"
+    summary["requested_risk_dates"] = requested_risk_dates
+    summary["used_risk_dates"] = used_risk_dates
+    summary["skipped_risk_dates"] = skipped_risk_dates
+    summary["min_valid_dates"] = min_valid_dates
     return ShrunkRiskModel(
         covariance=covariance,
         correlation=correlation,

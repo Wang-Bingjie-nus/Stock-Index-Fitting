@@ -20,20 +20,36 @@ from .minute_tick_cache_v03 import (
     CACHE_KIND,
     CACHE_SCHEMA_VERSION,
     CACHE_VALUE_FIELDS,
+    CONTINUOUS_TRADING_MINUTE_ROWS,
     MINUTE_ALIGNMENT,
     RAW_CACHE_COLUMNS,
+    build_unavailable_minute_tick_cache,
     build_minute_tick_cache,
     build_trading_minute_index,
     load_minute_tick_cache,
+    load_unavailable_minute_tick_cache,
     normalize_stock_codes,
     normalize_trade_date,
     save_minute_tick_cache,
+    save_unavailable_minute_tick_cache,
+    unavailable_minute_tick_cache_path,
     validate_minute_tick_cache,
 )
 
 
 CSI300_INDEX_CODE = "000300"
 CSI300_WEIGHT_PATTERN = re.compile(r"^沪深300_样本权重_(\d{8})\.csv$", re.IGNORECASE)
+UNAVAILABLE_SUMMARY_COLUMNS = (
+    "trade_date",
+    "reason",
+    "error_type",
+    "message",
+    "errors",
+    "source_files",
+    "details",
+    "marker_file",
+    "created_at_utc",
+)
 
 
 @dataclass(frozen=True)
@@ -295,6 +311,133 @@ def final_cache_path(
         "tick_codes": tick_codes,
     }
     return Path(cache_dir) / f"basket_minute_wide_{trade_date}_{_cache_hash(payload)}.pkl"
+
+
+def _publish_unavailable_marker(
+    cache_dir: str | Path,
+    trade_date: str,
+    *,
+    reason: str,
+    error_type: str | None = None,
+    details: dict[str, Any] | None = None,
+    stock_codes=None,
+) -> Path:
+    marker_path = unavailable_minute_tick_cache_path(cache_dir, trade_date)
+    marker = build_unavailable_minute_tick_cache(
+        trade_date,
+        reason=reason,
+        error_type=error_type,
+        details=details,
+        stock_codes=stock_codes,
+        generated_by="utils.cache_generator",
+    )
+    return save_unavailable_minute_tick_cache(marker, marker_path)
+
+
+def _remove_unavailable_marker(cache_dir: str | Path, trade_date: str) -> None:
+    marker_path = unavailable_minute_tick_cache_path(cache_dir, trade_date)
+    if marker_path.exists():
+        try:
+            marker_path.unlink()
+        except OSError as exc:
+            print(
+                f"  [{normalize_trade_date(trade_date)}] warning: complete cache is valid, "
+                f"but stale unavailable marker could not be deleted: {exc}"
+            )
+
+
+def unavailable_cache_summary_path(
+    cache_dir: str | Path,
+    trade_dates: list[str] | tuple[str, ...],
+) -> Path:
+    """Return the CSV path for one requested cache-generation batch."""
+
+    normalized_dates = [normalize_trade_date(value) for value in trade_dates]
+    if not normalized_dates:
+        label = "empty"
+    else:
+        label = f"{min(normalized_dates)}_{max(normalized_dates)}_{len(normalized_dates)}d"
+    return Path(cache_dir) / f"unavailable_cache_summary_{label}.csv"
+
+
+def write_unavailable_cache_summary(
+    cache_dir: str | Path,
+    trade_dates: list[str] | tuple[str, ...],
+) -> Path:
+    """Write unavailable reasons for the requested dates, including marker-hit dates."""
+
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    normalized_dates = [normalize_trade_date(value) for value in trade_dates]
+    rows: list[dict[str, Any]] = []
+
+    for trade_date in normalized_dates:
+        marker_path = unavailable_minute_tick_cache_path(cache_dir, trade_date)
+        if not marker_path.is_file():
+            continue
+        try:
+            marker = load_unavailable_minute_tick_cache(
+                marker_path,
+                trade_date=trade_date,
+            )
+            metadata = marker["metadata"]
+            details = dict(metadata.get("details") or {})
+            rows.append(
+                {
+                    "trade_date": trade_date,
+                    "reason": str(metadata.get("reason") or ""),
+                    "error_type": str(metadata.get("error_type") or ""),
+                    "message": str(details.get("message") or ""),
+                    "errors": json.dumps(
+                        details.get("errors", []),
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                    "source_files": json.dumps(
+                        details.get("source_files", []),
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                    "details": json.dumps(
+                        details,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    ),
+                    "marker_file": str(marker_path),
+                    "created_at_utc": str(metadata.get("created_at_utc") or ""),
+                }
+            )
+        except Exception as exc:
+            rows.append(
+                {
+                    "trade_date": trade_date,
+                    "reason": "unavailable_marker_read_failed",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                    "errors": "[]",
+                    "source_files": "[]",
+                    "details": json.dumps(
+                        {"message": str(exc)},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    "marker_file": str(marker_path),
+                    "created_at_utc": "",
+                }
+            )
+
+    report_path = unavailable_cache_summary_path(cache_dir, normalized_dates)
+    pd.DataFrame(rows, columns=UNAVAILABLE_SUMMARY_COLUMNS).to_csv(
+        report_path,
+        index=False,
+        encoding="utf-8-sig",
+    )
+    print(
+        f"[UNAVAILABLE SUMMARY] {len(rows)}/{len(normalized_dates)} date(s): "
+        f"{report_path}"
+    )
+    return report_path
 
 
 def _market_from_source_path(source_path: str | Path) -> str:
@@ -613,8 +756,8 @@ def generate_trade_date_cache(
     cache_dir: str | Path,
     max_workers: int = 4,
     force_rebuild: bool = False,
-) -> Path:
-    """Generate one correlation_v03-compatible cache using per-file processes."""
+) -> Path | None:
+    """Generate one cache, or publish a date-level unavailable marker on failure."""
     start_time = time.perf_counter()
     index_code = _normalize_index_code(index_code)
     trade_date = normalize_trade_date(trade_date)
@@ -640,51 +783,119 @@ def generate_trade_date_cache(
             )
             missing = cache["metadata"].get("missing_stocks", [])
             if not missing:
+                _remove_unavailable_marker(cache_dir, trade_date)
                 print(f"  [final:all] cache_hit: {target.name}")
                 return target
         except Exception as exc:
             print(f"  [final:all] invalid cache; rebuilding: {type(exc).__name__}: {exc}")
 
-    tasks = build_market_tasks(
-        trade_date,
-        stock_codes,
-        source_tick_root=source_tick_root,
-        partition_dir=partition_dir,
-        force_rebuild=force_rebuild,
-    )
-    worker_count = min(max_workers, len(tasks))
-    context = mp.get_context("spawn")
+    marker_path = unavailable_minute_tick_cache_path(cache_dir, trade_date)
+    if marker_path.exists() and not force_rebuild:
+        try:
+            marker = load_unavailable_minute_tick_cache(
+                marker_path,
+                trade_date=trade_date,
+            )
+            print(
+                f"  [unavailable:{trade_date}] marker_hit: {marker_path.name}; "
+                f"reason={marker['metadata']['reason']}"
+            )
+            return None
+        except Exception as exc:
+            print(
+                f"  [unavailable:{trade_date}] invalid marker; retrying source data: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
     errors: list[str] = []
-    with ProcessPoolExecutor(max_workers=worker_count, mp_context=context) as executor:
-        future_to_task = {
-            executor.submit(_build_market_partition, task): task
-            for task in tasks
-        }
-        for future in as_completed(future_to_task):
-            task = future_to_task[future]
-            try:
-                status, elapsed = future.result()
-                print(f"  [partition:{task.market}] {status} ({elapsed:.1f}s)")
-            except Exception as exc:
-                message = f"partition {task.market}: {type(exc).__name__}: {exc}"
-                errors.append(message)
-                print(f"  [partition:{task.market}] error\n    {type(exc).__name__}: {exc}")
-
-    if errors:
-        raise RuntimeError(
-            f"Cannot publish complete cache for {trade_date}; "
-            + "; ".join(errors)
+    tasks: list[MarketCacheTask] = []
+    try:
+        tasks = build_market_tasks(
+            trade_date,
+            stock_codes,
+            source_tick_root=source_tick_root,
+            partition_dir=partition_dir,
+            force_rebuild=force_rebuild,
         )
+        missing_source_paths = sorted({
+            task.source_path
+            for task in tasks
+            if not Path(task.source_path).is_file()
+        })
+        if missing_source_paths:
+            marker_path = _publish_unavailable_marker(
+                cache_dir,
+                trade_date,
+                reason="source_file_missing",
+                error_type="FileNotFoundError",
+                details={"source_files": missing_source_paths},
+                stock_codes=stock_codes,
+            )
+            print(
+                f"  [unavailable:{trade_date}] source files missing; "
+                f"marker={marker_path.name}; files={missing_source_paths}"
+            )
+            return None
 
-    final_cache = _combine_partition_caches(tasks, stock_codes, trade_date)
-    save_minute_tick_cache(final_cache, target)
-    validate_minute_tick_cache(
-        load_minute_tick_cache(target),
-        trade_date=trade_date,
-        stock_codes=stock_codes,
-    )
-    print(f"  [final:all] built ({time.perf_counter() - start_time:.1f}s): {target.name}")
-    return target
+        worker_count = min(max_workers, len(tasks))
+        context = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=worker_count, mp_context=context) as executor:
+            future_to_task = {
+                executor.submit(_build_market_partition, task): task
+                for task in tasks
+            }
+            for future in as_completed(future_to_task):
+                task = future_to_task[future]
+                try:
+                    status, elapsed = future.result()
+                    print(f"  [partition:{task.market}] {status} ({elapsed:.1f}s)")
+                except Exception as exc:
+                    message = f"partition {task.market}: {type(exc).__name__}: {exc}"
+                    errors.append(message)
+                    print(
+                        f"  [partition:{task.market}] error\n    "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+        if errors:
+            raise RuntimeError(
+                f"Cannot publish complete cache for {trade_date}; "
+                + "; ".join(errors)
+            )
+
+        final_cache = _combine_partition_caches(tasks, stock_codes, trade_date)
+        save_minute_tick_cache(final_cache, target)
+        validate_minute_tick_cache(
+            load_minute_tick_cache(target),
+            trade_date=trade_date,
+            stock_codes=stock_codes,
+        )
+        _remove_unavailable_marker(cache_dir, trade_date)
+        print(
+            f"  [final:all] built ({time.perf_counter() - start_time:.1f}s): "
+            f"{target.name}"
+        )
+        return target
+    except Exception as exc:
+        reason = "partition_generation_failed" if errors else "complete_cache_generation_failed"
+        details = {
+            "message": str(exc),
+            "errors": list(errors),
+            "source_files": [task.source_path for task in tasks],
+        }
+        marker_path = _publish_unavailable_marker(
+            cache_dir,
+            trade_date,
+            reason=reason,
+            error_type=type(exc).__name__,
+            details=details,
+            stock_codes=stock_codes,
+        )
+        print(
+            f"  [unavailable:{trade_date}] complete cache not published; "
+            f"marker={marker_path.name}; {type(exc).__name__}: {exc}"
+        )
+        return None
 
 
 def generate_csi300_caches(
@@ -709,10 +920,11 @@ def generate_csi300_caches(
             f"[DATE {date_number}/{len(normalized_dates)}] {trade_date}: "
             f"preparing CSI 300 cache with max_workers={max_workers}"
         )
-        stock_codes, weight_path = load_csi300_stock_codes(trade_date, weights_dir)
-        print(f"  weights={weight_path.name}, components={len(stock_codes)}")
-        generated_paths.append(
-            generate_trade_date_cache(
+        stock_codes: list[str] = []
+        try:
+            stock_codes, weight_path = load_csi300_stock_codes(trade_date, weights_dir)
+            print(f"  weights={weight_path.name}, components={len(stock_codes)}")
+            generated_path = generate_trade_date_cache(
                 trade_date,
                 stock_codes,
                 index_code=CSI300_INDEX_CODE,
@@ -721,8 +933,37 @@ def generate_csi300_caches(
                 max_workers=max_workers,
                 force_rebuild=force_rebuild,
             )
-        )
+            if generated_path is not None:
+                generated_paths.append(generated_path)
+        except Exception as exc:
+            marker_path = unavailable_minute_tick_cache_path(cache_dir, trade_date)
+            if marker_path.exists() and not force_rebuild:
+                try:
+                    marker = load_unavailable_minute_tick_cache(
+                        marker_path,
+                        trade_date=trade_date,
+                    )
+                    print(
+                        f"  [unavailable:{trade_date}] marker_hit: {marker_path.name}; "
+                        f"reason={marker['metadata']['reason']}"
+                    )
+                    continue
+                except Exception:
+                    pass
+            marker_path = _publish_unavailable_marker(
+                cache_dir,
+                trade_date,
+                reason="complete_cache_generation_failed",
+                error_type=type(exc).__name__,
+                details={"message": str(exc)},
+                stock_codes=stock_codes,
+            )
+            print(
+                f"  [unavailable:{trade_date}] generation failed; "
+                f"marker={marker_path.name}; {type(exc).__name__}: {exc}"
+            )
 
+    write_unavailable_cache_summary(cache_dir, normalized_dates)
     return generated_paths
 
 
@@ -797,9 +1038,10 @@ def _validate_complete_cache(
         raise ValueError(f"Complete cache contains missing stocks: {missing_stocks[:20]}")
     if len(cache["metadata"]["stock_codes"]) != len(stock_codes):
         raise ValueError("Complete cache stock count does not match the requested universe.")
-    if int(cache["metadata"]["minute_rows"]) != 242:
+    if int(cache["metadata"]["minute_rows"]) != CONTINUOUS_TRADING_MINUTE_ROWS:
         raise ValueError(
-            f"Complete cache must contain 242 minute rows, got "
+            "Complete cache must contain "
+            f"{CONTINUOUS_TRADING_MINUTE_ROWS} minute rows, got "
             f"{cache['metadata']['minute_rows']}."
         )
     return cache
@@ -828,26 +1070,63 @@ def merge_partition_caches_for_date(
     cache_dir: str | Path,
     delete_partition_caches: bool = True,
     overwrite_complete_cache: bool = False,
-) -> Path:
+) -> Path | None:
     """Merge one date's market partitions and optionally delete them after validation."""
 
     trade_date = normalize_trade_date(trade_date)
     cache_dir = Path(cache_dir)
     partition_dir = cache_dir / "partitions"
-    stock_codes, weight_path = load_csi300_stock_codes(trade_date, weights_dir)
+    marker_path = unavailable_minute_tick_cache_path(cache_dir, trade_date)
+    try:
+        stock_codes, weight_path = load_csi300_stock_codes(trade_date, weights_dir)
+    except Exception as exc:
+        if marker_path.exists() and not overwrite_complete_cache:
+            try:
+                marker = load_unavailable_minute_tick_cache(
+                    marker_path,
+                    trade_date=trade_date,
+                )
+                print(
+                    f"  [{trade_date}] unavailable marker hit: {marker_path.name}; "
+                    f"reason={marker['metadata']['reason']}"
+                )
+                return None
+            except Exception:
+                pass
+        marker_path = _publish_unavailable_marker(
+            cache_dir,
+            trade_date,
+            reason="complete_cache_merge_failed",
+            error_type=type(exc).__name__,
+            details={"message": str(exc)},
+        )
+        print(f"  [{trade_date}] merge unavailable: {marker_path.name}; {exc}")
+        return None
     complete_path = final_cache_path(
         cache_dir,
         CSI300_INDEX_CODE,
         trade_date,
         stock_codes,
     )
-    expected_tasks = build_market_tasks(
-        trade_date,
-        stock_codes,
-        source_tick_root=source_tick_root,
-        partition_dir=partition_dir,
-        force_rebuild=False,
-    )
+    try:
+        expected_tasks = build_market_tasks(
+            trade_date,
+            stock_codes,
+            source_tick_root=source_tick_root,
+            partition_dir=partition_dir,
+            force_rebuild=False,
+        )
+    except Exception as exc:
+        marker_path = _publish_unavailable_marker(
+            cache_dir,
+            trade_date,
+            reason="complete_cache_merge_failed",
+            error_type=type(exc).__name__,
+            details={"message": str(exc)},
+            stock_codes=stock_codes,
+        )
+        print(f"  [{trade_date}] merge unavailable: {marker_path.name}; {exc}")
+        return None
 
     complete_cache_is_valid = False
     if complete_path.is_file() and not overwrite_complete_cache:
@@ -861,6 +1140,7 @@ def merge_partition_caches_for_date(
             )
 
     if complete_cache_is_valid:
+        _remove_unavailable_marker(cache_dir, trade_date)
         print(f"  [{trade_date}] complete cache hit: {complete_path.name}")
         if delete_partition_caches:
             available_partition_paths = []
@@ -874,30 +1154,60 @@ def merge_partition_caches_for_date(
             _delete_partition_paths(available_partition_paths, trade_date)
         return complete_path
 
-    resolved_tasks = []
-    used_partition_paths = []
-    for task in expected_tasks:
-        partition_path = find_compatible_partition_cache(task, partition_dir)
-        resolved_tasks.append(replace(task, partition_cache_path=str(partition_path)))
-        used_partition_paths.append(partition_path)
-        print(
-            f"  [{trade_date}] partition {task.market}: "
-            f"stocks={len(task.stock_codes)}, file={partition_path.name}"
-        )
+    if marker_path.exists() and not overwrite_complete_cache:
+        try:
+            marker = load_unavailable_minute_tick_cache(
+                marker_path,
+                trade_date=trade_date,
+            )
+            print(
+                f"  [{trade_date}] unavailable marker hit: {marker_path.name}; "
+                f"reason={marker['metadata']['reason']}"
+            )
+            return None
+        except Exception as exc:
+            print(
+                f"  [{trade_date}] invalid unavailable marker; retrying merge: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
-    complete_cache = _combine_partition_caches(
-        resolved_tasks,
-        stock_codes,
-        trade_date,
-    )
-    save_minute_tick_cache(complete_cache, complete_path)
-    _validate_complete_cache(complete_path, trade_date, stock_codes)
+    try:
+        resolved_tasks = []
+        used_partition_paths = []
+        for task in expected_tasks:
+            partition_path = find_compatible_partition_cache(task, partition_dir)
+            resolved_tasks.append(replace(task, partition_cache_path=str(partition_path)))
+            used_partition_paths.append(partition_path)
+            print(
+                f"  [{trade_date}] partition {task.market}: "
+                f"stocks={len(task.stock_codes)}, file={partition_path.name}"
+            )
+
+        complete_cache = _combine_partition_caches(
+            resolved_tasks,
+            stock_codes,
+            trade_date,
+        )
+        save_minute_tick_cache(complete_cache, complete_path)
+        _validate_complete_cache(complete_path, trade_date, stock_codes)
+    except Exception as exc:
+        marker_path = _publish_unavailable_marker(
+            cache_dir,
+            trade_date,
+            reason="complete_cache_merge_failed",
+            error_type=type(exc).__name__,
+            details={"message": str(exc)},
+            stock_codes=stock_codes,
+        )
+        print(f"  [{trade_date}] merge unavailable: {marker_path.name}; {exc}")
+        return None
+
+    _remove_unavailable_marker(cache_dir, trade_date)
     print(
         f"  [{trade_date}] complete cache built: {complete_path.name} "
         f"({complete_path.stat().st_size / 1024**2:.2f} MB), "
         f"weights={weight_path.name}"
     )
-
     if delete_partition_caches:
         _delete_partition_paths(used_partition_paths, trade_date)
     return complete_path
@@ -946,16 +1256,17 @@ def merge_partition_caches_for_range(
     complete_paths = []
     for number, trade_date in enumerate(trade_dates, start=1):
         print(f"[MERGE {number}/{len(trade_dates)}] {trade_date}")
-        complete_paths.append(
-            merge_partition_caches_for_date(
-                trade_date,
-                weights_dir=weights_dir,
-                source_tick_root=source_tick_root,
-                cache_dir=cache_dir,
-                delete_partition_caches=delete_partition_caches,
-                overwrite_complete_cache=overwrite_complete_cache,
-            )
+        complete_path = merge_partition_caches_for_date(
+            trade_date,
+            weights_dir=weights_dir,
+            source_tick_root=source_tick_root,
+            cache_dir=cache_dir,
+            delete_partition_caches=delete_partition_caches,
+            overwrite_complete_cache=overwrite_complete_cache,
         )
+        if complete_path is not None:
+            complete_paths.append(complete_path)
+    write_unavailable_cache_summary(cache_dir, trade_dates)
     return complete_paths
 
 
@@ -977,4 +1288,6 @@ __all__ = [
     "resolve_csi300_weight_file",
     "resolve_trading_dates",
     "select_complete_trade_dates",
+    "unavailable_cache_summary_path",
+    "write_unavailable_cache_summary",
 ]

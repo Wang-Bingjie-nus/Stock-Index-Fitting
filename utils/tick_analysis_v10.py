@@ -266,7 +266,7 @@ def _hhmmss(t) -> str:
     return str(int(float(t)))[-6:]
 
 
-def _in_session(t, morning_start: str = "093000", afternoon_start: str = "130000") -> bool:
+def _in_session(t, morning_start: str = "093100", afternoon_start: str = "130100") -> bool:
     hhmmss = _hhmmss(t)
     return (morning_start <= hhmmss <= "113000") or (afternoon_start <= hhmmss <= "150000")
 
@@ -657,14 +657,14 @@ def _compressed_axis(times: pd.Index):
     for day_no, (date_key, positions) in enumerate(ordered_days):
         day_dt = dt[positions]
         date_label = pd.Timestamp(day_dt[0]).strftime("%Y-%m-%d")
-        for hhmm, suffix in (("09:30", "09:30"), ("11:30", "11:30"), ("15:00", "15:00")):
+        for hhmm, suffix in (("09:31", "09:31"), ("11:30", "11:30"), ("15:00", "15:00")):
             matches = [positions[i] for i, item in enumerate(day_dt) if item.strftime("%H:%M") == hhmm]
             if matches:
                 # Keep the compressed axis readable near day boundaries: every
                 # day gets an open label, midday is sparse context, and only the
                 # final close is labelled. Intermediate closes are still drawn
                 # as vertical separators.
-                if hhmm == "09:30":
+                if hhmm == "09:31":
                     tick_positions.append(matches[0])
                     tick_labels.append(f"{date_label}\n{suffix}")
                 elif hhmm == "11:30":
