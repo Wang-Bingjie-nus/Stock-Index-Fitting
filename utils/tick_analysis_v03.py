@@ -20,6 +20,7 @@ from .tick_analysis_v10 import (
     _stats_frame,
     build_corporate_action_quantity_schedule,
     combine_minute_tracking_results,
+    merge_corporate_action_sources,
     plot_tracking_matplotlib,
     plot_tracking_plotly,
     standardize_corporate_actions,
@@ -245,6 +246,7 @@ def save_tracking_outputs(
 __all__ = [
     "MinuteTrackingResult",
     "build_corporate_action_quantity_schedule",
+    "merge_corporate_action_sources",
     "standardize_corporate_actions",
     "build_minute_tracking_analysis",
     "combine_minute_tracking_results",

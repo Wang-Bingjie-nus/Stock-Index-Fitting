@@ -97,6 +97,43 @@ def standardize_corporate_actions(actions: pd.DataFrame | None) -> pd.DataFrame:
     if frame.empty:
         return _empty_action_frame()
 
+    canonical_value_cols = {"cash_dividend_per_share", "share_increase_ratio"}
+    if canonical_value_cols <= set(frame.columns):
+        duplicate_mask = frame.duplicated(subset=["stock_code", "ex_date"], keep=False)
+        if duplicate_mask.any():
+            duplicate_keys = (
+                frame.loc[duplicate_mask, ["stock_code", "ex_date"]]
+                .drop_duplicates()
+                .to_dict("records")
+            )
+            raise ValueError(
+                "Canonical corporate actions must contain one row per stock and ex-date; "
+                f"duplicate keys={duplicate_keys[:10]}."
+            )
+
+        frame["cash_dividend_per_share"] = pd.to_numeric(
+            frame["cash_dividend_per_share"], errors="coerce"
+        ).fillna(0.0).clip(lower=0.0)
+        frame["share_increase_ratio"] = pd.to_numeric(
+            frame["share_increase_ratio"], errors="coerce"
+        ).fillna(0.0).clip(lower=0.0)
+        if "source_cash_col" not in frame.columns:
+            frame["source_cash_col"] = "cash_dividend_per_share"
+        if "source_share_cols" not in frame.columns:
+            frame["source_share_cols"] = "share_increase_ratio"
+        return (
+            frame[[
+                "stock_code",
+                "ex_date",
+                "cash_dividend_per_share",
+                "share_increase_ratio",
+                "source_cash_col",
+                "source_share_cols",
+            ]]
+            .sort_values(["ex_date", "stock_code"])
+            .reset_index(drop=True)
+        )
+
     xt_cash = _numeric_col(frame, "interest", np.nan)
     gogoal_cash = _numeric_col(frame, "beftax_maxcashdiv", 0.0) / 10.0
     if "beftax_maxcashdiv" not in frame.columns and "beftax_mincashdiv" in frame.columns:
@@ -130,6 +167,60 @@ def standardize_corporate_actions(actions: pd.DataFrame | None) -> pd.DataFrame:
         "source_cash_col": lambda s: "|".join(sorted(set(map(str, s)))),
         "source_share_cols": lambda s: "|".join(sorted(set(map(str, s)))),
     })
+    return out.sort_values(["ex_date", "stock_code"]).reset_index(drop=True)
+
+
+def merge_corporate_action_sources(
+    gogoal_actions: pd.DataFrame | None,
+    xt_actions: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Resolve raw corporate-action sources to one canonical row per event.
+
+    Go-Goal can split one event into separate cash-dividend and share-transfer
+    rows, while XtQuant usually stores the same event in one combined row.
+    Standardizing each source before joining prevents the XtQuant row from
+    being repeated and summed once for every Go-Goal component row.
+
+    XtQuant is authoritative when it contains the event key. Go-Goal is used
+    only when that stock/ex-date key is absent from XtQuant.
+    """
+
+    gogoal = standardize_corporate_actions(gogoal_actions)
+    xtquant = standardize_corporate_actions(xt_actions)
+    if gogoal.empty and xtquant.empty:
+        out = _empty_action_frame()
+        out["action_source"] = pd.Series(dtype="object")
+        return out
+
+    value_cols = [
+        "cash_dividend_per_share",
+        "share_increase_ratio",
+        "source_cash_col",
+        "source_share_cols",
+    ]
+    gogoal = gogoal.rename(columns={col: f"{col}_gogoal" for col in value_cols})
+    xtquant = xtquant.rename(columns={col: f"{col}_xtquant" for col in value_cols})
+    gogoal["_gogoal_present"] = True
+    xtquant["_xtquant_present"] = True
+
+    merged = gogoal.merge(
+        xtquant,
+        on=["stock_code", "ex_date"],
+        how="outer",
+        validate="one_to_one",
+    )
+    xt_present = merged["_xtquant_present"].eq(True)
+
+    out = merged[["stock_code", "ex_date"]].copy()
+    for col in value_cols:
+        out[col] = merged[f"{col}_xtquant"].where(
+            xt_present,
+            merged[f"{col}_gogoal"],
+        )
+    out["action_source"] = np.where(xt_present, "xtquant", "gogoal")
+
+    if out.duplicated(subset=["stock_code", "ex_date"]).any():
+        raise RuntimeError("Resolved corporate actions contain duplicate event keys.")
     return out.sort_values(["ex_date", "stock_code"]).reset_index(drop=True)
 
 
