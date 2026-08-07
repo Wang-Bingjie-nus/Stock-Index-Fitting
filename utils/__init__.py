@@ -33,6 +33,7 @@ from .limit_impact_pipeline_v01 import (
     LimitImpactDateRun,
     LimitImpactPipelineConfig,
     filter_available_date_runs,
+    preflight_transition_daily_data,
 )
 from .limit_impact_v01 import combine_task11_summaries, expand_construction_date_list
 from .minute_tick_cache_v03 import (
@@ -112,6 +113,7 @@ __all__ = [
     "normalize_date_key",
     "optimize_portfolio_pareto_risk_v04",
     "preview_generation_plan",
+    "preflight_transition_daily_data",
     "project_weights_by_close_and_actions",
     "quantities_from_portfolio",
     "read_csi_file",

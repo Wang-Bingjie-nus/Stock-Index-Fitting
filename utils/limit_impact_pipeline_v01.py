@@ -77,15 +77,65 @@ def filter_available_date_runs(
 ) -> list[Any]:
     """Drop every D->D+1 interval touching an unavailable trading date."""
 
-    unavailable = {
-        normalize_trade_date(trade_date) for trade_date in unavailable_dates
-    }
+    unavailable = {normalize_trade_date(trade_date) for trade_date in unavailable_dates}
     return [
         run
         for run in date_runs
         if normalize_trade_date(run.construction_date) not in unavailable
         and normalize_trade_date(run.evaluation_date) not in unavailable
     ]
+
+
+def preflight_transition_daily_data(
+    date_runs: Iterable[Any],
+    daily_loader: Callable[[str], pd.DataFrame | None],
+) -> tuple[list[Any], dict[str, pd.DataFrame], pd.DataFrame]:
+    """Load each distinct D/D+1 NAS daybar and drop intervals touching a miss."""
+
+    runs = list(date_runs)
+    trade_dates = []
+    seen_dates = set()
+    for run in runs:
+        for value in (run.construction_date, run.evaluation_date):
+            trade_date = normalize_trade_date(value)
+            if trade_date not in seen_dates:
+                seen_dates.add(trade_date)
+                trade_dates.append(trade_date)
+
+    daily_data_by_date: dict[str, pd.DataFrame] = {}
+    unavailable_dates = set()
+    rows = []
+    for trade_date in trade_dates:
+        error_type = None
+        try:
+            daily_data = daily_loader(trade_date)
+        except FileNotFoundError as exc:
+            daily_data = None
+            error_type = type(exc).__name__
+
+        is_available = daily_data is not None and not daily_data.empty
+        if is_available:
+            daily_data_by_date[trade_date] = daily_data
+            reason = "available"
+        else:
+            unavailable_dates.add(trade_date)
+            reason = "nas_daily_missing_or_empty"
+            print(f"[SKIP DATE] NAS daily data is missing or empty: {trade_date}")
+        rows.append(
+            {
+                "trade_date": trade_date,
+                "is_available": bool(is_available),
+                "reason": reason,
+                "error_type": error_type,
+            }
+        )
+
+    available_runs = filter_available_date_runs(runs, unavailable_dates)
+    report = pd.DataFrame(
+        rows,
+        columns=["trade_date", "is_available", "reason", "error_type"],
+    )
+    return available_runs, daily_data_by_date, report
 
 
 def _sql_literal(value: Any) -> str:
@@ -223,7 +273,7 @@ class LimitImpactDateRun:
         import_time: str,
         xtdata_client: Any,
         gogoal_query_fn: Callable[..., pd.DataFrame],
-        daily_loader: Callable[[str], pd.DataFrame],
+        daily_loader: Callable[[str], pd.DataFrame | None],
     ) -> None:
         self.construction_date = normalize_trade_date(construction_date)
         self.config = config
@@ -366,7 +416,20 @@ class LimitImpactDateRun:
             encoding="utf-8-sig",
         )
 
-    def load_construction_prices(self) -> None:
+    def load_construction_prices(
+        self,
+        nas_daily: pd.DataFrame | None = None,
+    ) -> bool:
+        if nas_daily is None:
+            nas_daily = self.daily_loader(self.construction_date)
+        if nas_daily is None or nas_daily.empty:
+            print(
+                "[SKIP DATE] NAS component daily data is missing or empty: "
+                f"{self.construction_date}"
+            )
+            return False
+        require_columns(nas_daily, ["xt_stock_code", "tclose"], "NAS daily data")
+
         df_gogoal_index = fetch_gogoal_index_close(
             self.gogoal_query,
             self.config.index_code,
@@ -424,10 +487,6 @@ class LimitImpactDateRun:
             df_gogoal_close["gogoal_close"], errors="coerce"
         )
 
-        nas_daily = self.daily_loader(self.construction_date)
-        if nas_daily is None or nas_daily.empty:
-            raise RuntimeError("NAS component daily data is empty.")
-        require_columns(nas_daily, ["xt_stock_code", "tclose"], "NAS daily data")
         df_nas_close = nas_daily.loc[
             nas_daily["xt_stock_code"].isin(self.stock_codes),
             ["xt_stock_code", "tclose"],
@@ -477,6 +536,7 @@ class LimitImpactDateRun:
             index=False,
             encoding="utf-8-sig",
         )
+        return True
 
     def build_risk_model(self) -> None:
         (
@@ -823,12 +883,14 @@ class LimitImpactDateRun:
             )
         return dict(self.run_manifest)
 
-    def run_all(self) -> pd.DataFrame:
+    def run_all(self) -> pd.DataFrame | None:
         self.load_inputs()
-        self.load_construction_prices()
+        if not self.load_construction_prices():
+            return None
         self.build_risk_model()
         self.build_basket1()
-        self.load_d1_status()
+        if not self.load_d1_status():
+            return None
         self.build_basket3()
         self.load_index_opening_price()
         summary = self.evaluate()
@@ -854,5 +916,6 @@ __all__ = [
     "filter_available_date_runs",
     "fetch_gogoal_index_close",
     "fetch_gogoal_stock_closes",
+    "preflight_transition_daily_data",
     "read_projected_index_weights",
 ]
