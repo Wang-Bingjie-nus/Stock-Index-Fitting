@@ -169,3 +169,11 @@
     - visualisation 2：大金额，相关性矩阵
     - visualisation 3：大金额，金额贪心
     - visualisation 4：小金额，金额贪心
+
+## 2026-08-07
+
+**更新内容**
+- 优化pareto算法效率
+- 全局代码优化，移除历史函数与冗余调用
+- 一年结果
+    - visualisation 3：小金额，相关性矩阵，基准线

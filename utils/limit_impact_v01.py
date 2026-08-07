@@ -56,7 +56,7 @@ def combine_task11_summaries(
     summaries: Mapping[str, pd.DataFrame],
     construction_dates,
 ) -> pd.DataFrame:
-    """Combine per-date Task11 results into one ordered 3N-by-9 table."""
+    """Combine per-date Task11 results into one ordered 2N-by-9 table."""
 
     dates = normalize_construction_date_list(construction_dates)
     normalized_summaries = {
@@ -70,7 +70,7 @@ def combine_task11_summaries(
             f"missing={missing_dates}, extra={extra_dates}"
         )
 
-    expected_baskets = ["basket1", "basket2", "basket3"]
+    expected_baskets = ["basket1", "basket3"]
     ordered_frames = []
     for date in dates:
         frame = normalized_summaries[date].copy()
@@ -93,9 +93,9 @@ def combine_task11_summaries(
             frame.insert(0, "construction_date", date)
 
         baskets = frame["basket"].astype(str).tolist()
-        if sorted(baskets) != expected_baskets or len(frame) != 3:
+        if sorted(baskets) != expected_baskets or len(frame) != 2:
             raise ValueError(
-                f"Task11 summary for {date} must contain basket1/2/3 exactly once; "
+                f"Task11 summary for {date} must contain basket1/3 exactly once; "
                 f"got {baskets}."
             )
         basket_order = {name: order for order, name in enumerate(expected_baskets)}
@@ -104,7 +104,7 @@ def combine_task11_summaries(
         ordered_frames.append(frame[["construction_date", *TASK11_DISPLAY_COLUMNS]])
 
     combined = pd.concat(ordered_frames, ignore_index=True)
-    if len(combined) != 3 * len(dates):
+    if len(combined) != 2 * len(dates):
         raise AssertionError("Combined Task11 row count is inconsistent.")
     return combined
 
@@ -203,6 +203,53 @@ def get_recent_trading_dates(
             f"{end_date}; need {count}."
         )
     return dates[-count:]
+
+
+def expand_construction_date_list(
+    xtdata_client: Any,
+    construction_dates,
+    *,
+    market: str = "SH",
+) -> list[str]:
+    """Expand two date boundaries to all market dates in the closed interval.
+
+    A list whose length is not two remains an explicit construction-date list.
+    When exactly two values are supplied, they are interpreted as the start and
+    end of an observation interval. Non-trading boundary dates are allowed and
+    are naturally omitted from the returned trading-date list.
+    """
+
+    dates = normalize_construction_date_list(construction_dates)
+    if len(dates) != 2:
+        return dates
+
+    start_date, end_date = dates
+    if start_date > end_date:
+        raise ValueError(
+            "construction_date_ls range start must not be after range end: "
+            f"{start_date} > {end_date}"
+        )
+
+    calendar = xtdata_client.get_trading_calendar(
+        market,
+        start_time=start_date,
+        end_time=end_date,
+    )
+    expanded = sorted(
+        {
+            date
+            for date in (
+                _calendar_item_to_trade_date(item) for item in (calendar or [])
+            )
+            if date is not None and start_date <= date <= end_date
+        }
+    )
+    if not expanded:
+        raise RuntimeError(
+            f"XtQuant returned no {market} trading dates in "
+            f"[{start_date}, {end_date}]."
+        )
+    return expanded
 
 
 def _iter_chunks(values: list[str], chunk_size: int):
@@ -803,6 +850,7 @@ __all__ = [
     "classify_unavailable_stocks",
     "combine_task11_summaries",
     "evaluate_baskets_at_0931",
+    "expand_construction_date_list",
     "extract_opening_minute_snapshot",
     "fetch_xt_daily_suspend_status",
     "fetch_xt_historical_limit_prices",

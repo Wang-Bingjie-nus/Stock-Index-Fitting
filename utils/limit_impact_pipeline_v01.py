@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 
 from .limit_impact_v01 import (
-    build_basket2_from_basket1,
     classify_unavailable_stocks,
     evaluate_baskets_at_0931,
     extract_opening_minute_snapshot,
@@ -21,8 +20,13 @@ from .limit_impact_v01 import (
     unavailable_codes_from_report,
 )
 from .minute_cache_loader_v03 import load_stock_minute_cache_cached
-from .minute_tick_cache_v03 import normalize_stock_code, normalize_trade_date
-from .portfolio_construction_v03 import (
+from .minute_tick_cache_v03 import (
+    load_unavailable_minute_tick_cache,
+    normalize_stock_code,
+    normalize_trade_date,
+    unavailable_minute_tick_cache_path,
+)
+from .portfolio_construction_v04 import (
     ParetoOptimizerConfig,
     build_pareto_portfolio_for_weights,
     prepare_theoretical_portfolio,
@@ -65,6 +69,23 @@ class LimitImpactPipelineConfig:
             raise ValueError("risk_lookback_days must be positive.")
         if float(self.max_over_budget_ratio) < 1.0:
             raise ValueError("max_over_budget_ratio cannot be below 1.0.")
+
+
+def filter_available_date_runs(
+    date_runs: Iterable[Any],
+    unavailable_dates: Iterable[str],
+) -> list[Any]:
+    """Drop every D->D+1 interval touching an unavailable trading date."""
+
+    unavailable = {
+        normalize_trade_date(trade_date) for trade_date in unavailable_dates
+    }
+    return [
+        run
+        for run in date_runs
+        if normalize_trade_date(run.construction_date) not in unavailable
+        and normalize_trade_date(run.evaluation_date) not in unavailable
+    ]
 
 
 def _sql_literal(value: Any) -> str:
@@ -248,6 +269,58 @@ class LimitImpactDateRun:
             / self.config.index_code
             / "_tick_cache_correlation_v03"
         )
+
+    @property
+    def transition_dates(self) -> tuple[str, str]:
+        return self.construction_date, self.evaluation_date
+
+    def existing_unavailable_transition_dates(self) -> set[str]:
+        """Return D/D+1 dates that already carry any valid unavailable marker."""
+
+        unavailable_dates = set()
+        for trade_date in self.transition_dates:
+            marker_path = unavailable_minute_tick_cache_path(
+                self.tick_cache_dir,
+                trade_date,
+            )
+            if not marker_path.is_file():
+                continue
+            marker = load_unavailable_minute_tick_cache(
+                marker_path,
+                trade_date=trade_date,
+            )
+            metadata = marker["metadata"]
+            print(
+                f"[UNAVAILABLE CACHE HIT] transition preflight {trade_date}: "
+                f"reason={metadata['reason']}; "
+                f"details={metadata.get('details', {})}"
+            )
+            unavailable_dates.add(trade_date)
+        return unavailable_dates
+
+    def preflight_transition_minute_caches(self) -> set[str]:
+        """Build or validate D/D+1 caches before expensive portfolio work."""
+
+        for role, trade_date in zip(
+            ("construction", "evaluation"),
+            self.transition_dates,
+        ):
+            minute_cache = load_stock_minute_cache_cached(
+                trade_date,
+                self.stock_codes,
+                index_code=self.config.index_code,
+                cache_dir=self.tick_cache_dir,
+                source_tick_root=Path(self.config.source_tick_root),
+                label=(
+                    f"transition preflight {role} "
+                    f"{self.construction_date} {self.evaluation_date}"
+                ),
+                source_missing_policy="skip",
+            )
+            if minute_cache is None:
+                return {trade_date}
+            del minute_cache
+        return set()
 
     def load_inputs(self) -> None:
         self.df_index_weights = read_projected_index_weights(
@@ -514,7 +587,7 @@ class LimitImpactDateRun:
             )
         self._write_basket("basket1", self.basket1)
 
-    def load_d1_status(self) -> None:
+    def load_d1_status(self) -> bool:
         d1_minute_cache = load_stock_minute_cache_cached(
             self.evaluation_date,
             self.stock_codes,
@@ -522,8 +595,10 @@ class LimitImpactDateRun:
             cache_dir=self.tick_cache_dir,
             source_tick_root=Path(self.config.source_tick_root),
             label=f"D+1 opening cache {self.construction_date}",
-            source_missing_policy="raise",
+            source_missing_policy="skip",
         )
+        if d1_minute_cache is None:
+            return False
         self.df_opening_snapshot = extract_opening_minute_snapshot(
             d1_minute_cache,
             self.stock_codes,
@@ -576,31 +651,7 @@ class LimitImpactDateRun:
                 ascending=[False, True],
             )
         )
-
-    def build_basket2(self) -> None:
-        (
-            self.basket2,
-            self.df_removed_from_basket1,
-        ) = build_basket2_from_basket1(
-            self.basket1,
-            self.df_trading_status,
-        )
-        available_mask = ~self.basket2["is_unavailable"]
-        if not np.array_equal(
-            self.basket2.loc[available_mask, "target_qty"].to_numpy(),
-            self.basket2.loc[available_mask, "basket1_qty"].to_numpy(),
-        ):
-            raise RuntimeError(
-                "basket2 changed quantities of stocks that were not removed."
-            )
-        if (self.basket2.loc[self.basket2["is_unavailable"], "target_qty"] != 0).any():
-            raise RuntimeError("basket2 still holds unavailable stocks.")
-        self._write_basket("basket2", self.basket2)
-        self.df_removed_from_basket1.to_csv(
-            self.dirs["baskets"] / "basket1_to_basket2_removed.csv",
-            index=False,
-            encoding="utf-8-sig",
-        )
+        return True
 
     def build_basket3(self) -> None:
         self.basket3_build = build_pareto_portfolio_for_weights(
@@ -680,7 +731,6 @@ class LimitImpactDateRun:
         ) = evaluate_baskets_at_0931(
             {
                 "basket1": self.basket1,
-                "basket2": self.basket2,
                 "basket3": self.basket3,
             },
             self.df_opening_snapshot,
@@ -691,7 +741,7 @@ class LimitImpactDateRun:
         self.df_deviation_summary.insert(1, "construction_date", self.construction_date)
         self.df_deviation_summary.insert(2, "evaluation_date", self.evaluation_date)
         self.df_deviation_summary.to_csv(
-            self.dirs["reports"] / "three_basket_deviation_0931.csv",
+            self.dirs["reports"] / "two_basket_deviation_0931.csv",
             index=False,
             encoding="utf-8-sig",
         )
@@ -723,14 +773,13 @@ class LimitImpactDateRun:
     def finalize(self) -> dict[str, Any]:
         assert set(self.df_deviation_summary["basket"]) == {
             "basket1",
-            "basket2",
             "basket3",
         }
         assert len(self.df_trading_status) == len(self.df_index_weights)
         assert set(self.df_trading_status["stock_code"]) == set(
             self.df_index_weights["stock_code"]
         )
-        for basket in [self.basket1, self.basket2, self.basket3]:
+        for basket in [self.basket1, self.basket3]:
             assert not basket.loc[basket["target_qty"] > 0].empty
         assert not (
             set(self.basket3.loc[self.basket3["target_qty"] > 0, "stock_code"])
@@ -748,9 +797,6 @@ class LimitImpactDateRun:
             "manual_not_in_universe": self.manual_not_in_universe,
             "status_unavailable_codes": self.status_unavailable_codes,
             "all_unavailable_codes": self.all_unavailable_codes,
-            "removed_from_basket1_codes": self.df_removed_from_basket1[
-                "stock_code"
-            ].tolist(),
             "risk_matrix_mode": self.config.risk_matrix_mode,
             "requested_risk_dates": self.risk_dates,
             "used_risk_dates": self.used_risk_dates,
@@ -783,7 +829,6 @@ class LimitImpactDateRun:
         self.build_risk_model()
         self.build_basket1()
         self.load_d1_status()
-        self.build_basket2()
         self.build_basket3()
         self.load_index_opening_price()
         summary = self.evaluate()
@@ -806,6 +851,7 @@ class LimitImpactDateRun:
 __all__ = [
     "LimitImpactDateRun",
     "LimitImpactPipelineConfig",
+    "filter_available_date_runs",
     "fetch_gogoal_index_close",
     "fetch_gogoal_stock_closes",
     "read_projected_index_weights",
